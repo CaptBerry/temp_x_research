@@ -1,6 +1,8 @@
 import numpy as np
 
+from models.points import Points
 from models.surface import Surface
+from renderers.points_renderer import PointsRenderer
 from renderers.surface_renderer import SurfaceRenderer
 
 from pathlib import Path
@@ -49,4 +51,19 @@ class MainWindow(QMainWindow):
         mesh = renderer.render(surface)
 
         self.viewer.add_mesh(mesh)
+
+        points = Points(
+            [
+                [0.0, 0.0, 0.3],
+                [0.4, 0.2, 0.6],
+                [0.8, 0.7, 0.4],
+                [0.2, 0.9, 0.7],
+            ],
+            "Test points"
+        )
+
+        points_renderer = PointsRenderer()
+        points_mesh = points_renderer.render(points)
+
+        self.viewer.add_points(points_mesh, color="red")
 
