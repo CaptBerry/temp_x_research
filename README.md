@@ -9,4 +9,4 @@ Stack:
 - Python 3.12
 - PyQt6
 - PyVista
-- NumPy
+- NumPy 
