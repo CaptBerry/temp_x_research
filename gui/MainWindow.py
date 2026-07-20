@@ -1,6 +1,8 @@
 import numpy as np
 
+from models.points import Points
 from models.surface import Surface
+from renderers.points_renderer import PointsRenderer
 from renderers.surface_renderer import SurfaceRenderer
 
 from pathlib import Path
@@ -49,4 +51,23 @@ class MainWindow(QMainWindow):
         mesh = renderer.render(surface)
 
         self.viewer.add_mesh(mesh)
+
+        points_csv = (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "example_points.csv"
+        )
+        points = Points.from_csv(
+            points_csv,
+            x_column=0,
+            y_column=1,
+            z_column=2,
+            name="CSV test points",
+            skip_header=1
+        )
+
+        points_renderer = PointsRenderer()
+        points_mesh = points_renderer.render(points)
+
+        self.viewer.add_points(points_mesh, color="red")
 

@@ -54,8 +54,22 @@ class Viewer3D(QWidget):
         if hasattr(obj, "mesh"):
             self.plotter.add_mesh(obj.mesh)
 
-    def add_mesh(self, mesh):
+    def add_mesh(self, mesh, **kwargs):
         self.plotter.add_mesh(
             mesh,
-            show_edges=True
+            show_edges=True,
+            **kwargs
+        )
+
+    def add_points(self, points, radius=0.03, **kwargs):
+        spheres = points.glyph(
+            geom=pv.Sphere(radius=radius),
+            scale=False,
+            orient=False
+        )
+
+        self.plotter.add_mesh(
+            spheres,
+            smooth_shading=True,
+            **kwargs
         )
