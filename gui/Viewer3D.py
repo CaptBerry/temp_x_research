@@ -54,8 +54,18 @@ class Viewer3D(QWidget):
         if hasattr(obj, "mesh"):
             self.plotter.add_mesh(obj.mesh)
 
-    def add_mesh(self, mesh):
+    def add_mesh(self, mesh, **kwargs):
         self.plotter.add_mesh(
             mesh,
-            show_edges=True
+            show_edges=True,
+            **kwargs
+        )
+
+    def add_points(self, points, **kwargs):
+        self.plotter.add_mesh(
+            points,
+            style="points",
+            render_points_as_spheres=True,
+            point_size=12,
+            **kwargs
         )
