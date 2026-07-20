@@ -61,10 +61,15 @@ class Viewer3D(QWidget):
             **kwargs
         )
 
-    def add_points(self, points, **kwargs):
-        self.plotter.add_points(
-            points,
-            render_points_as_spheres=True,
-            point_size=12,
+    def add_points(self, points, radius=0.03, **kwargs):
+        spheres = points.glyph(
+            geom=pv.Sphere(radius=radius),
+            scale=False,
+            orient=False
+        )
+
+        self.plotter.add_mesh(
+            spheres,
+            smooth_shading=True,
             **kwargs
         )
