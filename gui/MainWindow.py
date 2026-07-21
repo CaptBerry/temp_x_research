@@ -70,4 +70,5 @@ class MainWindow(QMainWindow):
         points_mesh = points_renderer.render(points)
 
         self.viewer.add_points(points_mesh, color="red")
+        self.viewer.focus_on_scene()
 
