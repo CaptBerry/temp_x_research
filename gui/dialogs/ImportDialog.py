@@ -1,15 +1,29 @@
 from pathlib import Path
 
 from PyQt6 import uic
-from PyQt6.QtWidgets import QDialog, QFileDialog
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QDialog, QFileDialog, QPushButton, QLineEdit, QTableView, QComboBox, QListWidget
 
 from importers.CsvImporter import CsvImporter
 
 from models.PandasTableModel import PandasTableModel
-from PyQt6.QtWidgets import QHeaderView
+from PyQt6.QtWidgets import QHeaderView, QListWidgetItem
+
+from models.DataFrameProxyModel import DataFrameProxyModel
+from models.DataFrameModel import DataFrameModel
 
 
 class ImportDialog(QDialog):
+
+    buttonImport: QPushButton
+    buttonBrowse: QPushButton
+    buttonCancel: QPushButton
+    lineEditPathFile: QLineEdit
+    tableViewPreview: QTableView
+    comboBoxMapX: QComboBox
+    comboBoxMapY: QComboBox
+    comboBoxMapZ: QComboBox
+    listWidgetParametrs: QListWidget
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -19,6 +33,18 @@ class ImportDialog(QDialog):
         ui = Path(__file__).with_name("ImportDialog.ui")
         uic.loadUi(ui, self)
 
+        self.tableModel = DataFrameModel(self)
+
+        self.tableProxy = DataFrameProxyModel(self)
+
+        self.tableProxy.setSourceModel(
+            self.tableModel
+        )
+
+        self.tableViewPreview.setModel(
+            self.tableProxy
+        )
+
         self.init_ui()
         self.connect_signals()
 
@@ -27,6 +53,8 @@ class ImportDialog(QDialog):
         self.setWindowTitle("Import Data")
 
         self.buttonImport.setEnabled(False)
+
+        self.tableViewPreview.setSortingEnabled(True)
 
     def connect_signals(self):
 
@@ -50,16 +78,17 @@ class ImportDialog(QDialog):
 
         self.lineEditPathFile.setText(filename)
 
-        # self.load_preview(filename)
+        self.load_preview(filename)
 
     def load_preview(self, filename):
         df = self.importer.preview(filename)
 
-        model = PandasTableModel(df)
+        self.tableModel.set_dataframe(df)
 
-        self.previewTable.setModel(model)
+        print(self.tableModel.rowCount())
+        print(self.tableModel.columnCount())
 
-        header = self.previewTable.horizontalHeader()
+        header = self.tableViewPreview.horizontalHeader()
 
         header.setStretchLastSection(True)
 
@@ -69,23 +98,41 @@ class ImportDialog(QDialog):
 
         columns = list(df.columns)
 
-        self.xColumnCombo.clear()
-        self.yColumnCombo.clear()
-        self.zColumnCombo.clear()
+        self.comboBoxMapX.clear()
+        self.comboBoxMapY.clear()
+        self.comboBoxMapZ.clear()
 
-        self.xColumnCombo.addItems(columns)
-        self.yColumnCombo.addItems(columns)
-        self.zColumnCombo.addItems(columns)
+        self.comboBoxMapX.addItems(columns)
+        self.comboBoxMapY.addItems(columns)
+        self.comboBoxMapZ.addItems(columns)
 
         for i, name in enumerate(columns):
 
             lname = name.lower()
 
             if lname == "x":
-                self.xColumnCombo.setCurrentIndex(i)
+                self.comboBoxMapX.setCurrentIndex(i)
 
             elif lname == "y":
-                self.yColumnCombo.setCurrentIndex(i)
+                self.comboBoxMapY.setCurrentIndex(i)
 
             elif lname == "z":
-                self.zColumnCombo.setCurrentIndex(i)
+                self.comboBoxMapZ.setCurrentIndex(i)
+
+        self.listWidgetParametrs.clear()
+
+        for column in columns:
+
+            # Пропускаем координаты
+            if column.lower() in ("x", "y", "z"):
+                continue
+
+            item = QListWidgetItem(column)
+
+            item.setFlags(
+                item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+            )
+
+            item.setCheckState(Qt.CheckState.Checked)
+
+            self.listWidgetParametrs.addItem(item)

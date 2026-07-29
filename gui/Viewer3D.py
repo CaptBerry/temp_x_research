@@ -28,7 +28,7 @@ class Viewer3D(QWidget):
         self.init_view()
 
     def init_view(self):
-        self.plotter.set_background("black")
+        self.plotter.set_background("white")
 
         self.plotter.show_axes()
 

@@ -42,12 +42,12 @@
             </widget>
            </item>
            <item>
-            <widget class="QLineEdit" name="lineEdit_PathFile"/>
+            <widget class="QLineEdit" name="lineEditPathFile"/>
            </item>
           </layout>
          </item>
          <item>
-          <widget class="QPushButton" name="buttonOpenFile">
+          <widget class="QPushButton" name="buttonBrowse">
            <property name="text">
             <string>open file</string>
            </property>
@@ -137,7 +137,7 @@
           </widget>
          </item>
          <item>
-          <widget class="QTableView" name="tableView_Preview"/>
+          <widget class="QTableView" name="tableViewPreview"/>
          </item>
         </layout>
        </item>
@@ -167,7 +167,7 @@
             </widget>
            </item>
            <item>
-            <widget class="QComboBox" name="comboBox_MapX"/>
+            <widget class="QComboBox" name="comboBoxMapX"/>
            </item>
           </layout>
          </item>
@@ -181,7 +181,7 @@
             </widget>
            </item>
            <item>
-            <widget class="QComboBox" name="comboBox__MapY"/>
+            <widget class="QComboBox" name="comboBoxMapY"/>
            </item>
           </layout>
          </item>
@@ -195,21 +195,12 @@
             </widget>
            </item>
            <item>
-            <widget class="QComboBox" name="comboBox_MapZ"/>
+            <widget class="QComboBox" name="comboBoxMapZ"/>
            </item>
           </layout>
          </item>
          <item>
-          <widget class="QListWidget" name="listWidget_Parametrs">
-           <item>
-            <property name="text">
-             <string>Новый элемент</string>
-            </property>
-            <property name="checkState">
-             <enum>Unchecked</enum>
-            </property>
-           </item>
-          </widget>
+          <widget class="QListWidget" name="listWidgetParametrs"/>
          </item>
         </layout>
        </item>
@@ -225,14 +216,14 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
      <item>
-      <widget class="QPushButton" name="button_Cancel">
+      <widget class="QPushButton" name="buttonCancel">
        <property name="text">
         <string>Cancel</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="button_Import">
+      <widget class="QPushButton" name="buttonImport">
        <property name="text">
         <string>Import</string>
        </property>

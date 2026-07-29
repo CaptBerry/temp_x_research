@@ -1,4 +1,5 @@
 import numpy as np
+from PyQt6.QtGui import QAction
 
 from models.points import Points
 from models.surface import Surface
@@ -12,10 +13,13 @@ from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
 
 from gui.Viewer3D import Viewer3D
 
+from gui.dialogs.ImportDialog import ImportDialog
+
 
 class MainWindow(QMainWindow):
 
     viewerWidget: QWidget
+    actionImportXYZ: QAction
 
     def __init__(self):
         super().__init__()
@@ -72,3 +76,17 @@ class MainWindow(QMainWindow):
         self.viewer.add_points(points_mesh, color="red")
         self.viewer.focus_on_scene()
 
+        self.actionImportXYZ.triggered.connect(
+            self.show_import_dialog
+        )
+
+    def show_import_dialog(self):
+
+        dialog = ImportDialog(self)
+
+        result = dialog.exec()
+
+        if result:
+            print("Import")
+        else:
+            print("Cancel")
