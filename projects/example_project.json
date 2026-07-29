@@ -1,0 +1,30 @@
+{
+  "name": "Example visualization project",
+  "camera": {},
+  "objects": [
+    {
+      "type": "surface",
+      "name": "Test surface",
+      "vertices": [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0]
+      ],
+      "faces": [4, 0, 1, 2, 3]
+    },
+    {
+      "type": "points",
+      "name": "CSV test points",
+      "source": {
+        "type": "csv",
+        "path": "../data/example_points.csv",
+        "x_column": 0,
+        "y_column": 1,
+        "z_column": 2,
+        "delimiter": ",",
+        "skip_header": 1
+      }
+    }
+  ]
+}

@@ -1,4 +1,5 @@
-from scene_object import SceneObject
+from scene.camera import SceneCamera
+from scene.scene_object import SceneObject
 
 
 class Scene:
@@ -6,6 +7,7 @@ class Scene:
     def __init__(self):
 
         self.objects = []
+        self.camera = SceneCamera()
 
 
     def add(self, obj: SceneObject):
