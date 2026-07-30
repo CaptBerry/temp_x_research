@@ -85,8 +85,8 @@ class ImportDialog(QDialog):
 
         self.tableModel.set_dataframe(df)
 
-        print(self.tableModel.rowCount())
-        print(self.tableModel.columnCount())
+        # print(self.tableModel.rowCount())
+        # print(self.tableModel.columnCount())
 
         header = self.tableViewPreview.horizontalHeader()
 

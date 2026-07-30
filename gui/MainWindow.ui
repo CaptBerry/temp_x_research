@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>895</width>
-    <height>677</height>
+    <width>901</width>
+    <height>690</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -32,13 +32,7 @@
        </property>
        <layout class="QVBoxLayout" name="verticalLayout_3">
         <item>
-         <widget class="QTreeWidget" name="projectTree">
-          <column>
-           <property name="text">
-            <string notr="true">1</string>
-           </property>
-          </column>
-         </widget>
+         <widget class="QTreeView" name="projectTree"/>
         </item>
        </layout>
       </widget>
@@ -64,13 +58,7 @@
        </property>
        <layout class="QVBoxLayout" name="verticalLayout_5">
         <item>
-         <widget class="QTreeWidget" name="propertyTree">
-          <column>
-           <property name="text">
-            <string notr="true">1</string>
-           </property>
-          </column>
-         </widget>
+         <widget class="QTreeView" name="propertyTree"/>
         </item>
        </layout>
       </widget>
@@ -83,7 +71,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>895</width>
+     <width>901</width>
      <height>33</height>
     </rect>
    </property>
@@ -92,6 +80,8 @@
      <string>File</string>
     </property>
     <addaction name="actionImportXYZ"/>
+    <addaction name="actionnew_project"/>
+    <addaction name="actionopen_project"/>
    </widget>
    <widget class="QMenu" name="menu_2">
     <property name="title">
@@ -123,6 +113,16 @@
   <action name="actionImportXYZ">
    <property name="text">
     <string>Open csv file</string>
+   </property>
+  </action>
+  <action name="actionnew_project">
+   <property name="text">
+    <string>new project</string>
+   </property>
+  </action>
+  <action name="actionopen_project">
+   <property name="text">
+    <string>open project</string>
    </property>
   </action>
  </widget>
