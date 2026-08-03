@@ -1,26 +1,27 @@
-from uuid import uuid4
+import json
+from abc import ABC, abstractmethod
 
 
-class ProjectObject:
-
+class ProjectObject(ABC):
     def __init__(self, name="Object"):
-
-        self.id = str(uuid4())
-
         self.name = name
-
         self.parent = None
+        self.metadata = {}  # Дополнительные данные
 
-        self.visible = True
+    @abstractmethod
+    def to_dict(self) -> dict:
+        """Преобразовать объект в словарь для JSON"""
+        pass
 
-        self.metadata = {}
+    @classmethod
+    @abstractmethod
+    def from_dict(cls, data: dict):
+        """Воссоздать объект из словаря"""
+        pass
 
-    @property
-    def project(self):
-
-        node = self
-
-        while node.parent is not None:
-            node = node.parent
-
-        return node
+    def get_path(self):
+        """Получить путь к объекту в дереве проекта"""
+        if self.parent:
+            parent_path = self.parent.get_path()
+            return f"{parent_path}/{self.name}"
+        return self.name
