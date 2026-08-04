@@ -1,24 +1,22 @@
 from pathlib import Path
 from PyQt6 import uic
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTreeView, QFileDialog, QMessageBox, QStatusBar
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QFileDialog, QMessageBox, QStatusBar, QInputDialog
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QStandardItemModel, QStandardItem
 
 from gui.Viewer3D import Viewer3D
 from gui.dialogs.ImportDialog import ImportDialog
 from models.Project import Project
+from models.Folder import Folder
 from gui.custom_widgets.projectTreeView import ProjectTreeView
 
-
 class MainWindow(QMainWindow):
-
+    viewerWidget: QWidget
     actionImportXYZ: QAction
     action_open_project: QAction
     action_create_project: QAction
-    action_save_project: QAction  # Добавим действие сохранения
-    action_save_as_project: QAction  # Добавим действие "Сохранить как"
-
-    viewerWidget: QWidget
+    action_save_project: QAction
+    action_save_as_project: QAction
     projectTree: ProjectTreeView
     statusbar: QStatusBar
 
@@ -48,18 +46,14 @@ class MainWindow(QMainWindow):
 
     def replace_tree_view(self):
         """Заменить стандартный QTreeView на ProjectTreeView"""
-        print("Заменяем QTreeView на ProjectTreeView")
-
         parent_widget = self.projectTree.parent()
         parent_layout = parent_widget.layout()
 
         if parent_layout is None:
-            print("Ошибка: parent_layout is None")
             return
 
         index = parent_layout.indexOf(self.projectTree)
         if index == -1:
-            print("Ошибка: виджет не найден в layout")
             return
 
         new_tree = ProjectTreeView(self)
@@ -69,7 +63,194 @@ class MainWindow(QMainWindow):
         old_tree.deleteLater()
 
         self.projectTree = new_tree
-        print("Замена успешно выполнена")
+
+    def create_checkable_item(self, text, checked=False):
+        """Создать элемент с чекбоксом"""
+        item = QStandardItem(text)
+        item.setCheckable(True)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        return item
+
+    def update_project_tree(self):
+        """Обновить дерево проекта"""
+        if not self.project:
+            return
+
+        model = QStandardItemModel()
+        root = model.invisibleRootItem()
+
+        # Корневой элемент проекта
+        projectItem = self.create_checkable_item(self.project.name, True)
+        projectItem.setSelectable(True)
+
+        # Добавляем информацию о путях
+        if self.project.path:
+            pathItem = QStandardItem(f"Path: {self.project.path}")
+            pathItem.setSelectable(True)
+            projectItem.appendRow(pathItem)
+
+        if self.project.work_path:
+            workItem = QStandardItem(f"Work: {self.project.work_path}")
+            workItem.setSelectable(True)
+            projectItem.appendRow(workItem)
+
+        if self.project.source_path:
+            sourceItem = QStandardItem(f"Source: {self.project.source_path}")
+            sourceItem.setSelectable(True)
+            projectItem.appendRow(sourceItem)
+
+        # Добавляем структуру Work
+        work_section = self.create_checkable_item("Work", True)
+        projectItem.appendRow(work_section)
+
+        # Добавляем подпапки Work (только первый уровень)
+        for child in self.project.root.children:
+            if isinstance(child, Folder):
+                folder_item = self.create_checkable_item(f"{child.name}", True)
+                work_section.appendRow(folder_item)
+
+                # Добавляем содержимое папки (поверхности и точки)
+                self._add_folder_contents(folder_item, child)
+
+        # Добавляем Source секцию (только для отображения)
+        source_section = QStandardItem("Source")
+        source_section.setSelectable(True)
+        projectItem.appendRow(source_section)
+
+        root.appendRow(projectItem)
+        self.projectTree.setModel(model)
+        self.projectTree.expandAll()
+
+    def _add_folder_contents(self, parent_item, folder):
+        """Добавить содержимое папки (поверхности и точки)"""
+        from models.Surface import Surface
+        from models.PointCloud import PointCloud
+
+        for child in folder.children:
+            if isinstance(child, Surface):
+                item = self.create_checkable_item(f"{child.name}", True)
+                if child.file_path:
+                    item.setToolTip(child.file_path)
+                parent_item.appendRow(item)
+            elif isinstance(child, PointCloud):
+                item = self.create_checkable_item(f"{child.name}", True)
+                if child.file_path:
+                    item.setToolTip(child.file_path)
+                parent_item.appendRow(item)
+
+    def add_work_subfolder(self):
+        """Добавить подпапку в Work"""
+        if not self.project:
+            return
+
+        # Проверяем количество существующих подпапок
+        existing_folders = self.project.get_work_subfolders()
+
+        # Запрашиваем имя новой папки
+        name, ok = QInputDialog.getText(
+            self,
+            "Новая папка",
+            "Введите имя папки:"
+        )
+
+        if not ok or not name:
+            return
+
+        # Проверяем, существует ли уже папка с таким именем
+        for folder in existing_folders:
+            if folder.name == name:
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    f"Папка с именем '{name}' уже существует"
+                )
+                return
+
+        # Добавляем папку
+        if self.project.add_work_subfolder(name):
+            self.update_project_tree()
+            self.statusbar.showMessage(f"Папка '{name}' создана в Work", 3000)
+        else:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Не удалось создать папку"
+            )
+
+    def rename_work_subfolder(self, old_name, new_name):
+        """Переименовать подпапку в Work"""
+        if not self.project:
+            return
+
+        # Находим папку
+        folder = self.project.find_by_name(old_name)
+        if not folder or not isinstance(folder, Folder):
+            return
+
+        # Проверяем, что папка находится на первом уровне
+        if not self.project.is_work_subfolder(folder):
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Можно переименовывать только папки первого уровня в Work"
+            )
+            return
+
+        # Проверяем, не существует ли уже папка с новым именем
+        for child in self.project.root.children:
+            if isinstance(child, Folder) and child.name == new_name:
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    f"Папка с именем '{new_name}' уже существует"
+                )
+                return
+
+        # Переименовываем физическую папку
+        if self.project.work_path:
+            old_path = Path(self.project.work_path) / old_name
+            new_path = Path(self.project.work_path) / new_name
+            if old_path.exists():
+                old_path.rename(new_path)
+
+        # Переименовываем в модели
+        folder.name = new_name
+        self.project.modified = True
+        self.update_project_tree()
+        self.statusbar.showMessage(f"Папка переименована в '{new_name}'", 3000)
+
+    def delete_work_subfolder(self, name):
+        """Удалить подпапку из Work"""
+        if not self.project:
+            return
+
+        # Проверяем, есть ли содержимое в папке
+        folder = self.project.find_by_name(name)
+        if not folder or not isinstance(folder, Folder):
+            return
+
+        if len(folder.children) > 0:
+            reply = QMessageBox.question(
+                self,
+                "Удаление папки",
+                f"Папка '{name}' содержит данные. Удалить ее вместе с содержимым?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
+        # Удаляем физическую папку
+        if self.project.work_path:
+            folder_path = Path(self.project.work_path) / name
+            if folder_path.exists():
+                import shutil
+                shutil.rmtree(folder_path)
+
+        # Удаляем из модели
+        self.project.remove(folder)
+        self.project.modified = True
+        self.update_project_tree()
+        self.statusbar.showMessage(f"Папка '{name}' удалена", 3000)
 
     def show_import_dialog(self):
         if not self.project:
@@ -86,108 +267,6 @@ class MainWindow(QMainWindow):
             print("Import")
         else:
             print("Cancel")
-
-    def create_checkable_item(self, text, checked=False):
-        """Создать элемент с чекбоксом"""
-        item = QStandardItem(text)
-        item.setCheckable(True)
-        if checked:
-            item.setCheckState(Qt.CheckState.Checked)
-        else:
-            item.setCheckState(Qt.CheckState.Unchecked)
-        return item
-
-    def update_project_tree(self):
-        """Обновить дерево проекта с чекбоксами"""
-        if not self.project:
-            return
-
-        model = QStandardItemModel()
-        root = model.invisibleRootItem()
-
-        # Корневой элемент проекта с чекбоксом
-        projectItem = self.create_checkable_item(self.project.name, True)
-        projectItem.setSelectable(True)
-
-        # Добавляем информацию о путях (без чекбоксов)
-        if self.project.path:
-            pathItem = QStandardItem(f"Path: {self.project.path}")
-            pathItem.setSelectable(True)
-            projectItem.appendRow(pathItem)
-
-        if self.project.work_path:
-            workItem = QStandardItem(f"Work: {self.project.work_path}")
-            workItem.setSelectable(True)
-            projectItem.appendRow(workItem)
-
-        if self.project.source_path:
-            sourceItem = QStandardItem(f"Source: {self.project.source_path}")
-            sourceItem.setSelectable(True)
-            projectItem.appendRow(sourceItem)
-
-        root.appendRow(projectItem)
-        self.projectTree.setModel(model)
-        self.projectTree.expandAll()
-
-        # Подключаем сигнал изменения состояния чекбоксов
-        self.projectTree.model().dataChanged.connect(self.on_item_checked_changed)
-
-    def _add_tree_items_with_checkboxes(self, parent_item, folder, category_type):
-        """Рекурсивно добавить элементы с чекбоксами"""
-        from models.Folder import Folder
-        from models.Surface import Surface
-        from models.PointCloud import PointCloud
-
-        for child in folder.children:
-            if isinstance(child, Folder):
-                # Папка с чекбоксом
-                folder_item = self.create_checkable_item(child.name, True)
-                parent_item.appendRow(folder_item)
-                # Рекурсивно добавляем содержимое папки
-                self._add_tree_items_with_checkboxes(folder_item, child, category_type)
-            elif isinstance(child, Surface) and category_type == "surface":
-                item = self.create_checkable_item(child.name, True)
-                if child.file_path:
-                    item.setToolTip(child.file_path)
-                parent_item.appendRow(item)
-            elif isinstance(child, PointCloud) and category_type == "point":
-                item = self.create_checkable_item(child.name, True)
-                if child.file_path:
-                    item.setToolTip(child.file_path)
-                parent_item.appendRow(item)
-
-    def on_item_checked_changed(self, top_left, bottom_right, roles):
-        """Обработчик изменения состояния чекбокса"""
-        if Qt.ItemDataRole.CheckStateRole not in roles:
-            return
-
-        # Получаем измененный элемент
-        item = self.projectTree.model().itemFromIndex(top_left)
-        if not item:
-            return
-
-        # Получаем новое состояние
-        is_checked = item.checkState() == Qt.CheckState.Checked
-
-        # Блокируем сигналы чтобы избежать рекурсии
-        self.projectTree.model().blockSignals(True)
-
-        # Рекурсивно обновляем всех детей
-        self._update_children_check_state(item, is_checked)
-
-        # Обновляем родителя
-        parent = item.parent()
-        if parent:
-            self._update_parent_check_state(parent)
-
-        self.projectTree.model().blockSignals(False)
-
-        # Обновляем отображение в 3D вьювере
-        self.update_3d_viewer()
-
-        # Выводим информацию в статусбар
-        checked_count = self.count_checked_items()
-        self.statusbar.showMessage(f"Выбрано элементов: {checked_count}", 2000)
 
     def _update_children_check_state(self, parent_item, checked):
         """Рекурсивно обновить состояние чекбоксов всех детей"""
@@ -222,49 +301,10 @@ class MainWindow(QMainWindow):
         else:
             parent_item.setCheckState(Qt.CheckState.PartiallyChecked)
 
-    def count_checked_items(self, parent=None):
-        """Подсчитать количество выбранных элементов"""
-        if parent is None:
-            model = self.projectTree.model()
-            if not model:
-                return 0
-            parent = model.invisibleRootItem()
-
-        count = 0
-        for i in range(parent.rowCount()):
-            child = parent.child(i)
-            if child:
-                if child.isCheckable() and child.checkState() == Qt.CheckState.Checked:
-                    count += 1
-                count += self.count_checked_items(child)
-        return count
-
-    def get_checked_items(self, parent=None):
-        """Получить список всех выбранных элементов"""
-        if parent is None:
-            model = self.projectTree.model()
-            if not model:
-                return []
-            parent = model.invisibleRootItem()
-
-        checked_items = []
-        for i in range(parent.rowCount()):
-            child = parent.child(i)
-            if child:
-                if child.isCheckable() and child.checkState() == Qt.CheckState.Checked:
-                    checked_items.append(child)
-                checked_items.extend(self.get_checked_items(child))
-        return checked_items
-
     def update_3d_viewer(self):
         """Обновить 3D вьювер на основе выбранных элементов"""
-        # Получаем выбранные элементы
-        checked_items = self.get_checked_items()
-
-        # Здесь будет логика обновления 3D вьювера
-        print(f"Обновление 3D вьювера: выбрано {len(checked_items)} элементов")
-
-        # TODO: Обновить отображение в 3D вьювере
+        # TODO: Реализовать обновление 3D вьювера
+        pass
 
     def new_project(self):
         """Создать новый проект"""
@@ -282,12 +322,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Если проект уже имеет путь, сохраняем по нему
         if self.project.path:
             try:
                 self.project.save()
                 self.statusbar.showMessage(f"Проект сохранен: {self.project.path}", 5000)
-                self.update_project_tree()  # Обновляем для отображения путей
+                self.update_project_tree()
             except Exception as e:
                 QMessageBox.critical(
                     self,
@@ -295,11 +334,10 @@ class MainWindow(QMainWindow):
                     f"Не удалось сохранить проект:\n{str(e)}"
                 )
         else:
-            # Если пути нет - вызываем "Сохранить как"
             self.save_project_as()
 
     def save_project_as(self):
-        """Сохранить проект как... (выбор папки)"""
+        """Сохранить проект как..."""
         if not self.project:
             QMessageBox.warning(
                 self,
@@ -308,7 +346,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Диалог выбора папки для сохранения
+        # Предлагаем выбрать папку для сохранения
         folder_path = QFileDialog.getExistingDirectory(
             self,
             "Выберите папку для сохранения проекта",
@@ -321,7 +359,19 @@ class MainWindow(QMainWindow):
 
         try:
             project_path = Path(folder_path)
-            # Сохраняем проект по выбранному пути
+
+            # Проверяем, не существует ли уже проект с таким именем
+            project_file = project_path / f"{self.project.name}.json"
+            if project_file.exists():
+                reply = QMessageBox.question(
+                    self,
+                    "Проект существует",
+                    f"Проект с именем '{self.project.name}' уже существует. Перезаписать?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+
             self.project.save(project_path)
             self.statusbar.showMessage(f"Проект сохранен как: {project_path}", 5000)
             self.update_project_tree()
@@ -334,12 +384,11 @@ class MainWindow(QMainWindow):
 
     def open_project(self):
         """Открыть существующий проект"""
-        # Ищем файл project.json
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Открыть проект",
             "",
-            "Project files (project.json);;All files (*.*)"
+            "Project files (*.json);;All files (*.*)"
         )
 
         if not file_path:
@@ -360,25 +409,16 @@ class MainWindow(QMainWindow):
         self.update_project_tree()
         self.statusbar.showMessage(f"Проект загружен: {self.project.name}", 5000)
 
-        # TODO: Загрузить данные в 3D вьювер
-
     def create_project_at_path(self, project_path: Path):
         """Создать новый проект по указанному пути"""
         try:
-            # Создаем объект проекта
             self.project = Project(
                 name=project_path.name,
                 path=str(project_path)
             )
-
-            # Сохраняем проект (создает все папки и project.json)
             self.project.save()
-
-            # Обновляем дерево
             self.update_project_tree()
-
             self.statusbar.showMessage(f"Проект создан в: {project_path}", 5000)
-
         except Exception as e:
             QMessageBox.critical(
                 self,

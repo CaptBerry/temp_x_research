@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from datetime import datetime
 from .Folder import Folder
 from .Surface import Surface
 from .PointCloud import PointCloud
@@ -13,7 +14,7 @@ class Project:
         self.source_path = None  # Путь к папке source
         self.root = Folder(name)
         self.modified = False
-        self.version = "1.0"  # Версия формата проекта
+        self.version = "1.0"
 
     def add(self, obj, parent=None):
         if parent is None:
@@ -33,7 +34,7 @@ class Project:
     def get_project_file_path(self) -> Path:
         """Получить путь к файлу проекта"""
         if self.path:
-            return Path(self.path) / "project.json"
+            return Path(self.path) / f"{self.name}.json"
         return None
 
     def save(self, path=None):
@@ -46,12 +47,15 @@ class Project:
         if not self.path:
             raise ValueError("Путь к проекту не указан")
 
-        project_file = self.get_project_file_path()
-
         # Создаем структуру папок
-        Path(self.path).mkdir(parents=True, exist_ok=True)
-        Path(self.work_path).mkdir(exist_ok=True)
-        Path(self.source_path).mkdir(exist_ok=True)
+        project_path = Path(self.path)
+        project_path.mkdir(parents=True, exist_ok=True)
+
+        # Создаем папки work и source
+        work_path = Path(self.work_path)
+        source_path = Path(self.source_path)
+        work_path.mkdir(exist_ok=True)
+        source_path.mkdir(exist_ok=True)
 
         # Формируем данные для сохранения
         data = {
@@ -63,11 +67,13 @@ class Project:
             "tree": self.root.to_dict(),
             "metadata": {
                 "modified": self.modified,
-                "created": self._get_timestamp()
+                "created": self._get_timestamp(),
+                "last_saved": self._get_timestamp()
             }
         }
 
-        # Сохраняем в файл
+        # Сохраняем в файл с именем проекта
+        project_file = self.get_project_file_path()
         with open(project_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -92,7 +98,6 @@ class Project:
         # Восстанавливаем дерево проекта
         if "tree" in data:
             project.root = Folder.from_dict(data["tree"])
-            # Обновляем parent для всех элементов
             project._update_parents(project.root)
 
         project.modified = False
@@ -107,7 +112,6 @@ class Project:
 
     def _get_timestamp(self):
         """Получить текущую временную метку"""
-        from datetime import datetime
         return datetime.now().isoformat()
 
     def find_by_name(self, name, node=None):
@@ -115,37 +119,12 @@ class Project:
         if node is None:
             node = self.root
 
-        # Проверяем текущий узел
         if node.name == name:
             return node
 
-        # Проверяем детей
         if hasattr(node, 'children'):
             for child in node.children:
                 result = self.find_by_name(name, child)
-                if result:
-                    return result
-        return None
-
-    def find_by_path(self, path_parts, node=None):
-        """Найти объект по пути (список имен)"""
-        if node is None:
-            node = self.root
-
-        if not path_parts:
-            return node
-
-        current_name = path_parts[0]
-        if node.name != current_name:
-            return None
-
-        if len(path_parts) == 1:
-            return node
-
-        # Ищем среди детей
-        if hasattr(node, 'children'):
-            for child in node.children:
-                result = self.find_by_path(path_parts[1:], child)
                 if result:
                     return result
         return None
@@ -162,3 +141,50 @@ class Project:
                 if hasattr(child, 'children'):
                     objects.extend(self.get_all_objects(child))
         return objects
+
+    def get_work_folder(self):
+        """Получить корневую папку Work"""
+        return self.root
+
+    def get_work_subfolders(self):
+        """Получить все подпапки в Work (только первый уровень)"""
+        subfolders = []
+        for child in self.root.children:
+            if isinstance(child, Folder):
+                subfolders.append(child)
+        return subfolders
+
+    def add_work_subfolder(self, name):
+        """Добавить подпапку в Work (только первый уровень)"""
+        from .Folder import Folder
+
+        # Проверяем, что папка с таким именем не существует
+        for child in self.root.children:
+            if isinstance(child, Folder) and child.name == name:
+                return False
+
+        # Проверяем глубину - создаем только на первом уровне
+        folder = Folder(name)
+        self.root.add(folder)
+        self.modified = True
+
+        # Создаем физическую папку
+        if self.work_path:
+            work_path = Path(self.work_path)
+            folder_path = work_path / name
+            folder_path.mkdir(exist_ok=True)
+
+        return True
+
+    def is_work_subfolder(self, folder):
+        """Проверить, является ли папка подпапкой Work (первый уровень)"""
+        return folder.parent == self.root and isinstance(folder, Folder)
+
+    def get_folder_depth(self, folder):
+        """Получить глубину папки (0 - корень Work, 1 - подпапка)"""
+        depth = 0
+        current = folder
+        while current.parent:
+            depth += 1
+            current = current.parent
+        return depth

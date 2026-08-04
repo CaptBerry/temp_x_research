@@ -12,10 +12,6 @@ class ProjectTreeView(QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
         self.main_window = parent
-        print("ProjectTreeView успешно создан")
-
-        # Включаем возможность выбирать элементы
-        self.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
 
     def get_item_from_index(self, index):
         """Безопасное получение элемента из модели"""
@@ -41,7 +37,6 @@ class ProjectTreeView(QTreeView):
         if not item:
             return
 
-        # Проверяем проект
         if not hasattr(self.main_window, 'project') or self.main_window.project is None:
             return
 
@@ -50,20 +45,13 @@ class ProjectTreeView(QTreeView):
         project = self.main_window.project
         parent_text = self.get_item_parent_name(item)
 
-        # Определяем тип элемента
+        # Убираем эмодзи для сравнения
+        clean_text = item_text.replace("📁 ", "").replace("📐 ", "").replace("📊 ", "")
+
+        # Корневой элемент - проект
         if item_text == project.name:
-            # Корневой элемент - проект
-            add_action = menu.addAction("Добавить папку")
-            add_action.triggered.connect(lambda: self.add_folder_to_project(item))
-
-            menu.addSeparator()
-
-            # Действия для работы с чекбоксами
-            check_action = menu.addAction("Выбрать все")
-            check_action.triggered.connect(lambda: self.check_all_items(item, True))
-
-            uncheck_action = menu.addAction("Снять все")
-            uncheck_action.triggered.connect(lambda: self.check_all_items(item, False))
+            add_action = menu.addAction("Добавить папку в Work")
+            add_action.triggered.connect(lambda: self.main_window.add_work_subfolder())
 
             menu.addSeparator()
 
@@ -75,39 +63,49 @@ class ProjectTreeView(QTreeView):
             delete_action = menu.addAction("Удалить проект")
             delete_action.triggered.connect(lambda: self.delete_project(item))
 
-        elif item_text == "Surfaces" or item_text == "Points":
-            # Категории
-            category_name = item_text.lower()[:-1]
-            add_action = menu.addAction(f"Добавить {category_name}")
-            add_action.triggered.connect(lambda: self.add_item_to_category(item))
+        # Секция Work
+        elif item_text == "Work":
+            add_action = menu.addAction("Добавить папку")
+            add_action.triggered.connect(lambda: self.main_window.add_work_subfolder())
+
+        # Папка в Work (первый уровень)
+        elif parent_text == "Work" and clean_text.startswith("📁"):
+            folder_name = clean_text.replace("📁", "").strip()
+
+            add_action = menu.addAction("Добавить поверхность")
+            add_action.triggered.connect(lambda: self.add_surface_to_folder(folder_name))
+
+            add_point_action = menu.addAction("Добавить облако точек")
+            add_point_action.triggered.connect(lambda: self.add_pointcloud_to_folder(folder_name))
 
             menu.addSeparator()
 
-            # Действия для работы с чекбоксами
-            check_action = menu.addAction("Выбрать все")
-            check_action.triggered.connect(lambda: self.check_all_items(item, True))
+            rename_action = menu.addAction("Переименовать папку")
+            rename_action.triggered.connect(lambda: self.rename_work_folder(folder_name, item))
 
-            uncheck_action = menu.addAction("Снять все")
-            uncheck_action.triggered.connect(lambda: self.check_all_items(item, False))
+            menu.addSeparator()
 
+            delete_action = menu.addAction("Удалить папку")
+            delete_action.triggered.connect(lambda: self.main_window.delete_work_subfolder(folder_name))
+
+        # Элементы внутри папки (поверхности и точки)
+        elif parent_text and parent_text.startswith(""):
+            # Это элементы внутри папки
+            rename_action = menu.addAction("Переименовать")
+            rename_action.triggered.connect(lambda: self.rename_item(item))
+
+            menu.addSeparator()
+
+            delete_action = menu.addAction("Удалить")
+            delete_action.triggered.connect(lambda: self.delete_item(item))
+
+        # Пути
         elif item_text.startswith("Path:") or item_text.startswith("Work:") or item_text.startswith("Source:"):
-            # Пути
             open_action = menu.addAction("Открыть в проводнике")
             open_action.triggered.connect(lambda: self.open_in_explorer(item))
 
+        # Другие элементы
         else:
-            # Обычные элементы (папки, поверхности, точки)
-            # Проверяем, есть ли у элемента чекбокс
-            if item.isCheckable():
-                # Переключаем состояние чекбокса
-                if item.checkState() == Qt.CheckState.Checked:
-                    toggle_action = menu.addAction("Снять выделение")
-                else:
-                    toggle_action = menu.addAction("Выделить")
-                toggle_action.triggered.connect(lambda: self.toggle_item_check(item))
-
-                menu.addSeparator()
-
             rename_action = menu.addAction("Переименовать")
             rename_action.triggered.connect(lambda: self.rename_item(item))
 
@@ -118,47 +116,27 @@ class ProjectTreeView(QTreeView):
 
         menu.exec(self.mapToGlobal(position))
 
-    def toggle_item_check(self, item):
-        """Переключить состояние чекбокса элемента"""
-        if not item.isCheckable():
-            return
+    def add_surface_to_folder(self, folder_name):
+        """Добавить поверхность в папку"""
+        # Здесь будет логика импорта поверхности
+        self.main_window.show_import_dialog()
 
-        current_state = item.checkState()
-        new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
-        item.setCheckState(new_state)
+    def add_pointcloud_to_folder(self, folder_name):
+        """Добавить облако точек в папку"""
+        # Здесь будет логика импорта облака точек
+        QMessageBox.information(self, "Информация", f"Добавление облака точек в папку '{folder_name}'")
 
-        # Обновляем детей и родителей
-        self.main_window._update_children_check_state(item, new_state == Qt.CheckState.Checked)
+    def rename_work_folder(self, old_name, item):
+        """Переименовать папку в Work"""
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Переименовать папку",
+            "Введите новое имя папки:",
+            text=old_name
+        )
 
-        parent = item.parent()
-        if parent:
-            self.main_window._update_parent_check_state(parent)
-
-        self.main_window.update_3d_viewer()
-
-    def check_all_items(self, parent_item, checked):
-        """Выбрать/снять все элементы в ветке"""
-        for i in range(parent_item.rowCount()):
-            child = parent_item.child(i)
-            if child and child.isCheckable():
-                child.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-                self.check_all_items(child, checked)
-
-        # Обновляем родителя
-        parent = parent_item.parent()
-        if parent:
-            self.main_window._update_parent_check_state(parent)
-
-        self.main_window.update_3d_viewer()
-
-    def add_folder_to_project(self, item):
-        """Добавить папку в проект"""
-        from models.Folder import Folder
-
-        folder = Folder("Новая папка")
-        self.main_window.project.add(folder)
-        self.main_window.update_project_tree()
-        self.main_window.statusbar.showMessage("Добавлена новая папка", 3000)
+        if ok and new_name:
+            self.main_window.rename_work_subfolder(old_name, new_name)
 
     def rename_project(self, item):
         """Переименовать проект"""
@@ -187,15 +165,6 @@ class ProjectTreeView(QTreeView):
             self.main_window.project = None
             self.setModel(None)
             self.main_window.statusbar.showMessage("Проект удален", 3000)
-
-    def add_item_to_category(self, item):
-        """Добавить элемент в категорию"""
-        category = item.text().lower()[:-1]
-
-        if category == "surface":
-            self.main_window.show_import_dialog()
-        else:
-            QMessageBox.information(self, "Информация", f"Добавление {category}")
 
     def open_in_explorer(self, item):
         """Открыть папку в проводнике"""
