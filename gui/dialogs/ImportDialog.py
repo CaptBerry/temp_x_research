@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import QDialog, QFileDialog, QPushButton, QLineEdit, QTable
 
 from importers.CsvImporter import CsvImporter
 
-from models.PandasTableModel import PandasTableModel
 from PyQt6.QtWidgets import QHeaderView, QListWidgetItem
 
 from models.DataFrameProxyModel import DataFrameProxyModel

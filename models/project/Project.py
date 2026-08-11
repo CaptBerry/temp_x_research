@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from models.Folder import Folder
+from models.project.Folder import Folder
 from models.Surface import Surface
 from models.PointCloud import PointCloud
 

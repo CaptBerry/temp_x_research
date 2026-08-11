@@ -1,4 +1,4 @@
-from .ProjectObject import ProjectObject
+from models.project.ProjectObject import ProjectObject
 
 
 class Surface(ProjectObject):
