@@ -1,61 +1,63 @@
-from pathlib import Path
-
 import pandas as pd
 
-from models.project.ProjectObject import ProjectObject
 
+class TableData:
 
-class TableData(ProjectObject):
+    def __init__(
+            self,
+            dataframe: pd.DataFrame | None = None,
+            name: str = ""
+    ):
+        self.name = name
+        self.dataframe = (
+            dataframe
+            if dataframe is not None
+            else pd.DataFrame()
+        )
 
-    def __init__(self, name="Table"):
+        # Отображение координат
+        self.x_column = None
+        self.y_column = None
+        self.z_column = None
 
-        super().__init__(name)
-
-        # Основные данные
-        self.data = pd.DataFrame()
-
-        # Исходный файл
-        self.file_path: Path | None = None
-
-        # Настройки импорта
-        self.delimiter = ","
-        self.encoding = "utf-8"
-        self.header = True
-
-        # Соответствие ролей колонкам
-        self.mapping = {}
-
-        # Метаданные
-        self.metadata = {}
+        # Параметры
+        self.parameters = []
 
     @property
-    def column_names(self):
+    def shape(self):
+        return self.dataframe.shape
 
-        return list(self.data.columns)
-
+    @property
+    def columns(self):
+        return list(self.dataframe.columns)
 
     @property
     def row_count(self):
-
-        return len(self.data)
-
+        return len(self.dataframe)
 
     @property
     def column_count(self):
+        return len(self.dataframe.columns)
 
-        return len(self.data.columns)
+    def set_coordinates(self, x, y, z):
+        self.x_column = x
+        self.y_column = y
+        self.z_column = z
 
+    def set_parameters(self, parameters):
+        self.parameters = list(parameters)
 
-    @property
-    def empty(self):
+    def get_coordinates(self):
+        return self.dataframe[
+            [self.x_column, self.y_column, self.z_column]
+        ]
 
-        return self.data.empty
+    def get_parameter(self, name):
+        return self.dataframe[name]
 
-    # работа с датафрейм
-    def set_dataframe(self, dataframe: pd.DataFrame):
-        self.data = dataframe
-
-    def column(self, name):
-        return self.data[name]
-
-    
+    def clear(self):
+        self.dataframe = pd.DataFrame()
+        self.x_column = None
+        self.y_column = None
+        self.z_column = None
+        self.parameters = []

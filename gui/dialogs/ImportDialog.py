@@ -51,7 +51,7 @@ class ImportDialog(QDialog):
 
         self.setWindowTitle("Import Data")
 
-        self.buttonImport.setEnabled(False)
+        # self.buttonImport.setEnabled(False)
 
         self.tableViewPreview.setSortingEnabled(True)
 
