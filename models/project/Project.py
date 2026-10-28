@@ -1,543 +1,412 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
-from datetime import datetime
+import math
+import os
 from pathlib import Path
+import tempfile
 
 from models.project.Folder import Folder
+from models.project.ProjectObject import ProjectObject
+from models.project.ProjectStorage import ProjectFormatError, ProjectStorage
 from models.Surface import Surface
 from models.PointCloud import PointCloud
+from models.Well import Well
+from models.WellFile import WellFile
+from models.DataCube import DataCube
+from models.LayeredCube import LayeredCube
 
 
 class Project:
-    """
-    Главный класс проекта.
+    """Owns the object tree and dirty state, independently of Qt and disk I/O."""
 
-    Отвечает за:
-
-        • дерево объектов
-        • файловую структуру проекта
-        • загрузку/сохранение
-        • поиск объектов
-        • импорт файлов
-        • изменение дерева
-
-    GUI должен работать только через методы Project.
-    """
-
-    VERSION = 2
-
-    # ----------------------------------------------------------
-    # регистрация поддерживаемых типов объектов
-    # ----------------------------------------------------------
-
-    OBJECT_TYPES = {
-        "folder": Folder,
-        "surface": Surface,
-        "pointcloud": PointCloud,
-    }
-
-    @classmethod
-    def register_type(cls, name: str, object_class):
-        cls.OBJECT_TYPES[name] = object_class
-
-    # ----------------------------------------------------------
-    # создание
-    # ----------------------------------------------------------
+    VERSION = ProjectStorage.VERSION
+    OBJECT_TYPES = {"folder": Folder, "surface": Surface, "pointcloud": PointCloud,
+                    "well": Well, "wellfile": WellFile, "cube": DataCube,
+                    "layered_cube": LayeredCube}
 
     def __init__(self):
-
         self.name = "New Project"
-
         self.root = Folder("Work")
-
         self.project_path: Path | None = None
-
         self.modified = False
-
-        self.created = datetime.now().isoformat()
+        self.created = datetime.now(timezone.utc).isoformat()
         self.last_saved = None
+        self.axis_scale = (1.0, 1.0, 1.0)
+        self._migrated_axis_scale = False
 
-    # ----------------------------------------------------------
-    # свойства
-    # ----------------------------------------------------------
+    @classmethod
+    def register_type(cls, name, object_class):
+        cls.OBJECT_TYPES[name] = object_class
 
     @property
     def is_saved(self):
-
         return self.project_path is not None
 
     @property
     def project_file(self):
-
-        if self.project_path is None:
-            return None
-
-        return self.project_path / "project.json"
+        return self.project_path / "project.json" if self.is_saved else None
 
     @property
     def source_path(self):
-
-        if self.project_path is None:
-            return None
-
-        return self.project_path / "source"
+        return self.project_path / "source" if self.is_saved else None
 
     @property
     def work_path(self):
-
-        if self.project_path is None:
-            return None
-
-        return self.project_path / "work"
+        return self.project_path / "work" if self.is_saved else None
 
     @property
     def cache_path(self):
+        return self.project_path / "cache" if self.is_saved else None
 
-        if self.project_path is None:
-            return None
-
-        return self.project_path / "cache"
-
-    # ----------------------------------------------------------
-    # создание проекта
-    # ----------------------------------------------------------
+    @staticmethod
+    def _check_destination(path):
+        if path.exists() and (not path.is_dir() or any(path.iterdir())):
+            raise FileExistsError("Выберите новую или пустую папку для проекта.")
 
     @classmethod
-    def create(cls, path: str | Path, name: str | None = None):
-
-        path = Path(path)
-
+    def create(cls, path, name=None):
+        path = Path(path).resolve()
+        cls._check_destination(path)
         project = cls()
-
-        project.project_path = path
-
-        if name is None:
-            project.name = path.name
-        else:
-            project.name = name
-
-        project._create_project_structure()
-
-        project.save()
-
+        project.name = cls._valid_name(name if name is not None else path.name)
+        project._save_to(path, new_destination=True)
         return project
-
-    # ----------------------------------------------------------
-    # открытие проекта
-    # ----------------------------------------------------------
 
     @classmethod
     def open(cls, project_file):
-
-        project_file = Path(project_file)
-
-        with open(project_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
+        project_file = Path(project_file).resolve()
+        if project_file.is_dir():
+            project_file /= "project.json"
+        data = ProjectStorage.read_manifest(project_file)
         project = cls()
-
         project.project_path = project_file.parent
-
         project.name = data["name"]
-
-        project.created = data.get("created")
-
+        project.created = data.get("created", project.created)
         project.last_saved = data.get("last_saved")
-
-        project.modified = False
-
-        # дерево загрузим позже
         project._deserialize(data)
-
+        ProjectStorage.load_assets(project, data)
+        project.modified = data.get("version", 2) != cls.VERSION or project._migrated_axis_scale
         return project
 
-    # ----------------------------------------------------------
-    # сохранение
-    # ----------------------------------------------------------
-
-    def save(self):
-
-        if self.project_path is None:
-            raise RuntimeError("Project path is not specified.")
-
-        self._create_project_structure()
-
-        self.last_saved = datetime.now().isoformat()
-
-        data = self._serialize()
-
-        with open(self.project_file, "w", encoding="utf8") as f:
-            json.dump(
-                data,
-                f,
-                indent=4,
-                ensure_ascii=False
-            )
-
+    def _save_to(self, path, *, new_destination=False):
+        saved_at = datetime.now(timezone.utc).isoformat()
+        if new_destination:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # A failed first save must not leave a nonempty destination which
+            # prevents retrying Save As. Stage beside the chosen destination.
+            with tempfile.TemporaryDirectory(prefix=".xsearch-", dir=path.parent) as temporary:
+                staging = Path(temporary).resolve()
+                if not staging.is_relative_to(path.parent.resolve()):
+                    raise ValueError("Временная папка находится вне каталога назначения.")
+                paths = ProjectStorage.save(self, staging, saved_at)
+                self._check_destination(path)
+                if path.exists():
+                    path.rmdir()  # Only an empty destination is allowed here.
+                os.replace(staging, path)
+        else:
+            paths = ProjectStorage.save(self, path, saved_at)
+        # Commit in-memory state only after the manifest has been replaced.
+        self.project_path = Path(path).resolve()
+        self.last_saved = saved_at
+        for obj in self.walk():
+            if obj.uuid in paths:
+                relative = paths[obj.uuid]
+                obj.file_path = str(self.project_path / relative) if relative else None
         self.modified = False
 
-    # ----------------------------------------------------------
-    # файловая структура
-    # ----------------------------------------------------------
+    def save(self):
+        if self.project_path is None:
+            raise RuntimeError("Не указана папка проекта.")
+        self._save_to(self.project_path)
 
-    def _create_project_structure(self):
-
-        self.project_path.mkdir(parents=True, exist_ok=True)
-
-        self.source_path.mkdir(exist_ok=True)
-
-        self.work_path.mkdir(exist_ok=True)
-
-        self.cache_path.mkdir(exist_ok=True)
-
-    # ----------------------------------------------------------
-    # сериализация
-    # ----------------------------------------------------------
+    def save_as(self, path):
+        path = Path(path).resolve()
+        if path != self.project_path:
+            self._check_destination(path)
+        self._save_to(path, new_destination=path != self.project_path)
 
     def _serialize(self):
+        self._validate_axis_scale(self.axis_scale)
+        return dict(version=self.VERSION, name=self.name, created=self.created,
+                    last_saved=self.last_saved, axis_scale=list(self.axis_scale),
+                    tree=self.root.to_dict())
 
-        return {
+    @staticmethod
+    def _validate_axis_scale(values):
+        if (not isinstance(values, (list, tuple)) or len(values) != 3
+                or any(type(value) not in (int, float) or not math.isfinite(value)
+                       or not 0.001 <= value <= 10000 for value in values)):
+            raise ValueError("Масштаб каждой оси должен быть от 0,001 до 10000.")
+        return tuple(float(value) for value in values)
 
-            "version": self.VERSION,
-
-            "name": self.name,
-
-            "created": self.created,
-
-            "last_saved": self.last_saved,
-
-            "tree": self.root.to_dict()
-
-        }
+    def set_axis_scale(self, x, y, z):
+        candidate = self._validate_axis_scale((x, y, z))
+        if candidate == self.axis_scale:
+            return False
+        self.axis_scale = candidate
+        self.mark_modified()
+        return True
 
     def _deserialize(self, data):
+        if "axis_scale" in data:
+            self.axis_scale = self._validate_axis_scale(data["axis_scale"])
+        else:
+            # Migrate the earlier per-object scale when all non-default values
+            # agree. Conflicting old transforms cannot define one scene scale.
+            legacy_scales = set()
 
-        self.root = self._load_node(data["tree"])
+            def collect_legacy(node):
+                appearance = node.get("appearance", {}) if isinstance(node, dict) else {}
+                if isinstance(appearance, dict) and any(f"scale_{a}" in appearance for a in "xyz"):
+                    scale = tuple(appearance.get(f"scale_{a}", 1) for a in "xyz")
+                    if scale != (1, 1, 1):
+                        legacy_scales.add(self._validate_axis_scale(scale))
+                for child in node.get("children", []) if isinstance(node, dict) else []:
+                    collect_legacy(child)
 
-    def _load_node(self, data):
+            collect_legacy(data["tree"])
+            if len(legacy_scales) == 1:
+                self.axis_scale = legacy_scales.pop()
+                self._migrated_axis_scale = True
+        identifiers = set()
 
-        object_type = data["type"]
+        def load_node(node):
+            if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+                raise ProjectFormatError("Некорректный узел дерева проекта.")
+            object_class = self.OBJECT_TYPES.get(node.get("type"))
+            if object_class is None:
+                raise ProjectFormatError(f"Неизвестный тип объекта: {node.get('type')}")
+            obj = object_class.from_dict(node)
+            if not isinstance(obj.uuid, str) or not obj.uuid or obj.uuid in identifiers:
+                raise ProjectFormatError("Повторяющийся или некорректный UUID объекта.")
+            identifiers.add(obj.uuid)
+            children = node.get("children", [])
+            if not isinstance(children, list) or (children and not isinstance(obj, Folder)):
+                raise ProjectFormatError("Дочерние объекты разрешены только у папок.")
+            for child in children:
+                obj._add(load_node(child))
+            return obj
 
-        cls = self.OBJECT_TYPES.get(object_type)
-
-        if cls is None:
-            raise RuntimeError(
-                f"Unknown project object type: {object_type}"
-            )
-
-        obj = cls.from_dict(data)
-
-        for child_data in data.get("children", []):
-            child = self._load_node(child_data)
-
-            obj._add(child)
-
-        return obj
-
-    # ----------------------------------------------------------
-    # служебные
-    # ----------------------------------------------------------
+        self.root = load_node(data["tree"])
+        if not isinstance(self.root, Folder):
+            raise ProjectFormatError("Корень проекта должен быть папкой.")
 
     def mark_modified(self):
-
         self.modified = True
 
-    def __repr__(self):
+    @staticmethod
+    def _valid_name(name):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Имя не может быть пустым.")
+        return name.strip()
 
-        return f"<Project {self.name}>"
-
-    # ----------------------------------------------------------
-    # работа с деревом
-    # ----------------------------------------------------------
+    def _require_member(self, obj):
+        if not any(node is obj for node in self.walk()):
+            raise ValueError("Объект не принадлежит этому проекту.")
 
     def add(self, obj, parent=None):
-        """
-        Добавить объект в дерево проекта.
-
-        Если parent не указан, объект добавляется
-        в корень Work.
-        """
-
-        if parent is None:
-            parent = self.root
-
+        parent = self.root if parent is None else parent
+        self._require_member(parent)
         if not isinstance(parent, Folder):
-            raise TypeError("Parent must be Folder")
-
-        if obj.parent is not None:
-            raise RuntimeError("Object already belongs to project.")
-
-        parent.add(obj)
-
-        self.modified = True
-
+            raise TypeError("Родитель должен быть папкой.")
+        if not isinstance(obj, ProjectObject) or obj.parent is not None:
+            raise ValueError("Объект уже принадлежит дереву или имеет неверный тип.")
+        descendants = list(self.walk(obj))
+        existing_ids = {node.uuid for node in self.walk()}
+        incoming_ids = [node.uuid for node in descendants]
+        if len(set(incoming_ids)) != len(incoming_ids) or existing_ids.intersection(incoming_ids):
+            raise ValueError("Объект уже находится в проекте или имеет повторяющийся UUID.")
+        container_style = None
+        if isinstance(parent, (WellFile, LayeredCube)):
+            container_style = parent.appearance
+            container_style.validate(obj.TYPE)
+            if container_style.color_map is not None:
+                obj.color_values(container_style.color_map.field)
+        parent._add(obj)
+        if container_style is not None:
+            obj.appearance = container_style
+        self.mark_modified()
         return obj
 
     def remove(self, obj):
-        """
-        Удалить объект из дерева.
-        """
-
-        if obj.parent is None:
-            return
-
-        obj.parent.remove(obj)
-
-        self.modified = True
+        self._require_member(obj)
+        if obj is self.root:
+            raise ValueError("Нельзя удалить корневую папку.")
+        obj.parent._remove(obj)
+        self.mark_modified()
 
     def clear(self):
-        """
-        Очистить дерево проекта.
-        """
-
-        self.root.clear()
-
-        self.modified = True
+        self.root._clear()
+        self.mark_modified()
 
     def move(self, obj, new_parent):
-        """
-        Переместить объект.
-        """
-
-        if obj.parent is None:
-            raise RuntimeError("Object has no parent.")
-
-        if not isinstance(new_parent, Folder):
-            raise TypeError("new_parent must be Folder")
-
-        obj.parent.remove(obj)
-
-        new_parent.add(obj)
-
-        self.modified = True
+        self._require_member(obj)
+        self._require_member(new_parent)
+        if obj is self.root or not isinstance(new_parent, Folder):
+            raise ValueError("Невозможно переместить объект в указанную папку.")
+        if any(node is new_parent for node in self.walk(obj)):
+            raise ValueError("Нельзя переместить папку внутрь самой себя.")
+        if obj.parent is new_parent:
+            return
+        if isinstance(new_parent, WellFile):
+            if not isinstance(obj, Well) or any(well.well_id == obj.well_id for well in new_parent.wells):
+                raise ValueError("В файл скважин можно переместить только скважину с новым ID.")
+        if isinstance(new_parent, LayeredCube):
+            if (not isinstance(obj, DataCube) or not obj.is_corner_point
+                    or obj.metadata.get("layer_index") is None
+                    or any(str(layer.metadata.get("layer_index")) == str(obj.metadata["layer_index"])
+                           for layer in new_parent.layers)):
+                raise ValueError("В послойный куб можно переместить только новый слой corner-point grid.")
+        container_style = None
+        if isinstance(new_parent, (WellFile, LayeredCube)):
+            container_style = new_parent.appearance
+            container_style.validate(obj.TYPE)
+            if container_style.color_map is not None:
+                obj.color_values(container_style.color_map.field)
+        obj.parent._remove(obj)
+        new_parent._add(obj)
+        if container_style is not None:
+            obj.appearance = container_style
+        self.mark_modified()
 
     def rename(self, obj, new_name):
-        """
-        Переименовать объект.
-        """
+        self._require_member(obj)
+        new_name = self._valid_name(new_name)
+        if obj.name != new_name:
+            obj.name = new_name
+            self.mark_modified()
 
-        obj.name = new_name
+    def rename_project(self, name):
+        name = self._valid_name(name)
+        if self.name != name:
+            self.name = name
+            self.mark_modified()
 
-        self.modified = True
+    def set_visible(self, obj, visible):
+        self._require_member(obj)
+        if obj.visible != bool(visible):
+            obj.visible = bool(visible)
+            self.mark_modified()
 
-    # ----------------------------------------------------------
-    # поиск
-    # ----------------------------------------------------------
+    def set_appearance(self, obj, **changes):
+        self._require_member(obj)
+        if isinstance(obj, (WellFile, LayeredCube)):
+            candidate = obj.appearance.updated(obj.TYPE, **changes)
+            if candidate.color_map is not None:
+                obj.color_values(candidate.color_map.field)
+            # Validate every child before changing the container or any child.
+            for child in obj.children:
+                candidate.validate(child.TYPE)
+                if candidate.color_map is not None:
+                    child.color_values(candidate.color_map.field)
+            if candidate == obj.appearance and all(child.appearance == candidate
+                                                   for child in obj.children):
+                return False
+            obj.appearance = candidate
+            for child in obj.children:
+                child.appearance = candidate
+            self.mark_modified()
+            return True
+        if not isinstance(obj, (PointCloud, Surface)):
+            raise ValueError("У этого объекта нет настроек отображения.")
+        candidate = obj.appearance.updated(obj.TYPE, **changes)
+        if isinstance(obj, DataCube) and not obj.is_corner_point and candidate.mode in ("surface", "wireframe"):
+            raise ValueError("Для куба из узлов доступны только точки и сферы.")
+        if candidate.color_map is not None:
+            obj.color_values(candidate.color_map.field)
+        if candidate == obj.appearance:
+            return False
+        obj.appearance = candidate
+        self.mark_modified()
+        return True
+
+    def is_visible(self, obj):
+        while obj is not None:
+            if not obj.visible:
+                return False
+            obj = obj.parent
+        return True
 
     def find(self, predicate):
-        """
-        Универсальный поиск.
+        return next((obj for obj in self.walk() if predicate(obj)), None)
 
-        Пример:
-
-        project.find(lambda x: x.name == "Top")
-        """
-
-        for obj in self.walk():
-
-            if predicate(obj):
-                return obj
-
-        return None
+    def find_by_id(self, object_id):
+        return self.find(lambda obj: obj.uuid == object_id)
 
     def find_by_name(self, name):
-
-        return self.find(lambda x: x.name == name)
+        return self.find(lambda obj: obj.name == name)
 
     def find_folder(self, name):
-
-        obj = self.find(lambda x:
-                        isinstance(x, Folder)
-                        and x.name == name)
-
-        return obj
+        return self.find(lambda obj: isinstance(obj, Folder) and obj.name == name)
 
     def exists(self, name):
-
         return self.find_by_name(name) is not None
 
-    # ----------------------------------------------------------
-    # обход дерева
-    # ----------------------------------------------------------
-
     def walk(self, node=None):
-        """
-        Итератор по всем объектам проекта.
-        """
-
-        if node is None:
-            node = self.root
-
+        node = self.root if node is None else node
         yield node
-
-        if isinstance(node, Folder):
-
-            for child in node.children:
-                yield from self.walk(child)
+        for child in node.children:
+            yield from self.walk(child)
 
     def children(self, folder=None):
-
-        if folder is None:
-            folder = self.root
-
-        return list(folder.children)
+        return list((self.root if folder is None else folder).children)
 
     def get_path(self, obj):
-
-        names = []
-
-        current = obj
-
-        while current is not None:
-            names.append(current.name)
-
-            current = current.parent
-
-        return "/".join(reversed(names))
+        self._require_member(obj)
+        return obj.path
 
     def find_by_path(self, path):
-
-        parts = Path(path).parts
-
+        parts = str(path).replace("\\", "/").strip("/").split("/")
         node = self.root
-
-        if parts[0] == self.root.name:
+        if parts and parts[0] == node.name:
             parts = parts[1:]
-
-        for name in parts:
-
-            found = None
-
-            for child in node.children:
-
-                if child.name == name:
-                    found = child
-
-                    break
-
-            if found is None:
+        for name in filter(None, parts):
+            node = next((child for child in node.children if child.name == name), None)
+            if node is None:
                 return None
-
-            node = found
-
         return node
 
     def objects(self, object_type=None):
-
-        if object_type is None:
-            return list(self.walk())
-
-        return [
-
-            obj
-
-            for obj in self.walk()
-
-            if isinstance(obj, object_type)
-
-        ]
+        return [obj for obj in self.walk() if object_type is None or isinstance(obj, object_type)]
 
     def folders(self):
-
-        return [
-
-            obj
-
-            for obj in self.walk()
-
-            if isinstance(obj, Folder)
-
-        ]
+        return self.objects(Folder)
 
     def surfaces(self):
-
-        return [
-
-            obj
-
-            for obj in self.walk()
-
-            if isinstance(obj, Surface)
-
-        ]
+        return self.objects(Surface)
 
     def pointclouds(self):
+        return [obj for obj in self.walk() if type(obj) is PointCloud]
 
-        return [
+    def wells(self):
+        return self.objects(Well)
 
-            obj
+    def well_files(self):
+        return self.objects(WellFile)
 
-            for obj in self.walk()
-
-            if isinstance(obj, PointCloud)
-
-        ]
-
-    def _restore_parents(self, node):
-
-        if not isinstance(node, Folder):
-            return
-
-        for child in node.children:
-            child.parent = node
-
-            self._restore_parents(child)
+    def cubes(self):
+        return self.objects(DataCube)
 
     def to_json(self):
-
-        return json.dumps(
-
-            self._serialize(),
-
-            indent=4,
-
-            ensure_ascii=False
-
-        )
-
-    def save_as(self, path):
-
-        self.project_path = Path(path)
-
-        self.save()
+        """Metadata preview; persistence must use save()/save_as()."""
+        return json.dumps(self._serialize(), indent=2, ensure_ascii=False)
 
     def close(self):
-
-        self.root.clear()
-
-        self.project_path = None
-
-        self.modified = False
+        self.__init__()
 
     def has_unsaved_changes(self):
-
         return self.modified
 
-    def import_file(
-        self,
-        obj,
-        destination_folder=None
-    ):
-
-        self.add(obj, destination_folder)
-
-        self.modified = True
-
-        return obj
+    def import_file(self, obj, destination_folder=None):
+        if isinstance(obj, (PointCloud, Surface, WellFile, LayeredCube)):
+            obj.validate()
+        return self.add(obj, destination_folder)
 
     def validate(self):
+        return self.is_saved and all(path.exists() for path in
+                                    (self.project_file, self.source_path, self.work_path))
 
-        if self.project_path is None:
-            return False
-
-        if not self.project_file.exists():
-            return False
-
-        if not self.source_path.exists():
-            return False
-
-        if not self.work_path.exists():
-            return False
-
-        return True
+    def __repr__(self):
+        return f"<Project {self.name}>"

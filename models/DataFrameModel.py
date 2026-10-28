@@ -119,3 +119,5 @@ class DataFrameModel(QAbstractTableModel):
 
         return list(self._df.columns)
 
+    def set_table_data(self, table_data):
+        self.set_dataframe(table_data.dataframe)

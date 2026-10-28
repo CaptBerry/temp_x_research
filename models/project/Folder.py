@@ -76,31 +76,16 @@ class Folder(ProjectObject):
     # ------------------------------------------------------------------
 
     def to_dict(self):
-
-        return {
-
-            "type": self.TYPE,
-
-            "name": self.name,
-
-            "metadata": self.metadata,
-
-            "children": [
-
-                child.to_dict()
-
-                for child in self._children
-
-            ]
-
-        }
+        data = self._base_dict()
+        data["children"] = [child.to_dict() for child in self._children]
+        return data
 
     @classmethod
     def from_dict(cls, data):
 
         folder = cls(data["name"])
 
-        folder.metadata = data.get("metadata", {})
+        folder._load_base(data)
 
         #
         # Детей загружает Project.
