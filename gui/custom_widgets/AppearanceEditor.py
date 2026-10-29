@@ -2,7 +2,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout,
-    QGroupBox, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QGroupBox, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from models.Appearance import Appearance
@@ -72,6 +72,22 @@ class AppearanceEditor(QGroupBox):
         form.addRow(self.width_label, self.width_spin)
         form.addRow("Прозрачность", self.transparency_spin)
         form.addRow(self.reset_button)
+        self.label_group = QGroupBox("Подписи скважин")
+        label_form = QFormLayout(self.label_group)
+        self.label_visible_check = QCheckBox("Показывать")
+        self.label_color_button = QPushButton()
+        self.label_font_combo = QComboBox()
+        for caption, family in (("Arial", "arial"), ("Times", "times"),
+                                ("Courier", "courier")):
+            self.label_font_combo.addItem(caption, family)
+        self.label_size_spin = QSpinBox()
+        self.label_size_spin.setRange(8, 72)
+        self.label_size_spin.setSuffix(" px")
+        label_form.addRow("Подпись", self.label_visible_check)
+        label_form.addRow("Цвет", self.label_color_button)
+        label_form.addRow("Шрифт", self.label_font_combo)
+        label_form.addRow("Размер", self.label_size_spin)
+        layout.addWidget(self.label_group)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -85,6 +101,11 @@ class AppearanceEditor(QGroupBox):
         self.color_button.clicked.connect(lambda: self._choose_color(self.color_button, "Цвет объекта"))
         self.outline_color_button.clicked.connect(
             lambda: self._choose_color(self.outline_color_button, "Цвет обводки"))
+        self.label_visible_check.toggled.connect(self._label_changed)
+        self.label_font_combo.currentIndexChanged.connect(self._label_changed)
+        self.label_size_spin.valueChanged.connect(self._label_changed)
+        self.label_color_button.clicked.connect(
+            lambda: self._choose_color(self.label_color_button, "Цвет подписи", self._label_changed))
         self.reset_button.clicked.connect(self._reset)
         self.palette_button.clicked.connect(lambda: self.paletteRequested.emit(self._object_id))
         self.clear_palette_button.clicked.connect(self._clear_palette)
@@ -105,6 +126,7 @@ class AppearanceEditor(QGroupBox):
             self._object_id = obj.uuid if supported else None
             self._object_type = obj.TYPE if supported else None
             self.fields.setEnabled(supported)
+            self.label_group.setVisible(supported and obj.TYPE in ("well", "wellfile"))
             self.selection_label.setText(obj.name if supported else "Выберите объект в дереве.")
             self.mode_combo.clear()
             if not supported:
@@ -128,6 +150,12 @@ class AppearanceEditor(QGroupBox):
             self.color_button.setEnabled(appearance.color_map is None)
             self.palette_button.setText("Изменить палитру…" if appearance.color_map else "Настроить палитру…")
             self._set_color(self.outline_color_button, appearance.outline_color)
+            if obj.TYPE in ("well", "wellfile"):
+                self.label_visible_check.setChecked(appearance.label_visible)
+                self._set_color(self.label_color_button, appearance.label_color)
+                self.label_font_combo.setCurrentIndex(self.label_font_combo.findData(appearance.label_font))
+                self.label_size_spin.setValue(appearance.label_size)
+                self._sync_label_controls()
             self._sync_controls()
         finally:
             self._loading = False
@@ -159,11 +187,27 @@ class AppearanceEditor(QGroupBox):
             "opacity": 1 - self.transparency_spin.value() / 100,
         })
 
-    def _choose_color(self, button, title):
+    def _sync_label_controls(self):
+        enabled = self.label_visible_check.isChecked()
+        for widget in (self.label_color_button, self.label_font_combo, self.label_size_spin):
+            widget.setEnabled(enabled)
+
+    def _label_changed(self, *args):
+        if self._loading or self._object_id is None:
+            return
+        self._sync_label_controls()
+        self.appearanceChanged.emit(self._object_id, {
+            "label_visible": self.label_visible_check.isChecked(),
+            "label_color": self.label_color_button.property("color"),
+            "label_font": self.label_font_combo.currentData(),
+            "label_size": self.label_size_spin.value(),
+        })
+
+    def _choose_color(self, button, title, on_change=None):
         color = QColorDialog.getColor(QColor(button.property("color")), self, title)
         if color.isValid():
             self._set_color(button, color.name())
-            self._changed()
+            (on_change or self._changed)()
 
     def _reset(self):
         if self._object_id is not None:

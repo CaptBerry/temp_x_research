@@ -62,6 +62,8 @@ class AppearanceTests(unittest.TestCase):
                        {"point_size": 0}, {"line_width": -1}, {"point_size": True},
                        {"outline": "yes"}, {"point_shape": "unknown"}, {"typo": 1},
                        {"opacity": -0.1}, {"opacity": 1.1}, {"opacity": float("nan")},
+                       {"label_visible": "yes"}, {"label_color": "orange"},
+                       {"label_font": "unknown"}, {"label_size": 7},
                        {"scale_x": 2}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 project.set_appearance(cloud, **change)

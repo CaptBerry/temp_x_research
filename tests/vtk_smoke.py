@@ -59,14 +59,37 @@ def run_phase(directory, phase):
                                                    ("x", "y", "z"), ("value",)))
             window.set_project(project)
             well_file = project.well_files()[0]
+            assert set(window.viewer.well_label_actors) == {well.uuid for well in well_file.wells}
+            data_actors = {well.uuid: window.viewer.actors[well.uuid] for well in well_file.wells}
+            window._change_appearance(well_file.uuid, {
+                "label_color": "#00ff00", "label_font": "courier", "label_size": 23})
+            for well in well_file.wells:
+                assert window.viewer.actors[well.uuid] is data_actors[well.uuid]
+                label = window.viewer.well_label_actors[well.uuid]
+                text = label.GetMapper().GetInputConnection(0, 0).GetProducer().GetTextProperty()
+                assert text.GetFontSize() == 23
+                assert text.GetFontFamilyAsString() == "Courier"
+                assert np.allclose(text.GetColor(), (0, 1, 0))
+            window._change_appearance(well_file.uuid, {"label_visible": False})
+            assert not window.viewer.well_label_actors
+            window._change_appearance(well_file.uuid, {"label_visible": True})
+            assert set(window.viewer.well_label_actors) == {well.uuid for well in well_file.wells}
             window.select_object(well_file.uuid)
             assert window.appearance_editor.fields.isEnabled()
             actors_before = {well.uuid: window.viewer.actors[well.uuid] for well in well_file.wells}
+            meshes_before = {well.uuid: actors_before[well.uuid].mapper.dataset for well in well_file.wells}
             window._change_appearance(well_file.uuid, {
                 "color_map": ColorMap.default("gamma", 1, 4), "opacity": 0.7})
-            assert all(window.viewer.actors[well.uuid] is actors_before[well.uuid]
+            assert all(window.viewer.actors[well.uuid] is not actors_before[well.uuid]
+                       and window.viewer.actors[well.uuid].mapper.dataset is meshes_before[well.uuid]
                        and window.viewer.actors[well.uuid].mapper.scalar_visibility
                        for well in well_file.wells)
+            window.set_container_visibility(well_file, False)
+            assert all(well.uuid not in window.viewer.actors for well in well_file.wells)
+            window.set_container_visibility(well_file, True)
+            assert all(well.uuid in window.viewer.actors for well in well_file.wells)
+            window.set_theme("dark")
+            assert window.viewer.plotter.background_color.hex_rgb == "#1a2028"
             assert window.save_project()
             source.unlink()
             wells_source.unlink()
@@ -78,8 +101,12 @@ def run_phase(directory, phase):
             surface = window.project.surfaces()[0]
             assert window.project.well_files()[0].well_ids == ("A", "B")
             assert window.project.well_files()[0].appearance.color_map.field == "gamma"
+            assert window.project.well_files()[0].appearance.label_font == "courier"
+            assert set(window.viewer.well_label_actors) == {well.uuid for well in window.project.wells()}
             assert len(window.project.wells()) == 2
             assert window.project.cubes()[0].is_regular_grid
+            assert window.theme == "dark"
+            assert window.viewer.plotter.background_color.hex_rgb == "#1a2028"
             pd.testing.assert_frame_equal(cloud.dataframe, CsvImporter().load(fixture), check_exact=True)
         app.processEvents()
         assert cloud.uuid in window.viewer.actors

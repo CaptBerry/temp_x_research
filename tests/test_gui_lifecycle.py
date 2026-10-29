@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pandas as pd
 from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
+from PyQt6.QtGui import QColor, QCloseEvent, QPalette
+from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget
 
 from gui.MainWindow import MainWindow
 from gui.dialogs.ImportDialog import ImportDialog
@@ -31,6 +31,7 @@ class FakeViewer(QWidget):
         self.closed = False
         self.appearances = {}
         self.axis_scale = (1, 1, 1)
+        self.background = None
 
     def clear_scene(self):
         self.actors.clear()
@@ -47,6 +48,9 @@ class FakeViewer(QWidget):
 
     def set_axis_scale(self, scale):
         self.axis_scale = tuple(scale)
+
+    def set_theme(self, background):
+        self.background = background
 
     def update_object_appearance(self, obj):
         self.appearances[obj.uuid] = obj.appearance
@@ -140,6 +144,48 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(loaded.pointclouds()[0].name, "Renamed")
         self.assertFalse(loaded.is_visible(loaded.pointclouds()[0]))
 
+    def test_container_select_all_and_clear_selection(self):
+        project = self.attach_project()
+        folder = project.add(Folder("Группа"))
+        nested = project.add(Folder("Вложенная"), folder)
+        cloud = self.add_cloud(project, nested)
+        self.window.set_container_visibility(folder, False)
+        self.assertTrue(all(not node.visible for node in (folder, nested, cloud)))
+        self.assertNotIn(cloud.uuid, self.window.viewer.actors)
+        group_item = self.window.projectTree.model().item(0).child(0).child(0)
+        self.assertEqual(group_item.checkState(), Qt.CheckState.Unchecked)
+        self.assertEqual(group_item.child(0).child(0).checkState(), Qt.CheckState.Unchecked)
+        self.window.set_container_visibility(folder, True)
+        self.assertTrue(all(node.visible for node in (folder, nested, cloud)))
+        self.assertIn(cloud.uuid, self.window.viewer.actors)
+        group_item = self.window.projectTree.model().item(0).child(0).child(0)
+        self.assertEqual(group_item.checkState(), Qt.CheckState.Checked)
+        self.window.save_project()
+        restored = Project.open(project.project_file)
+        self.assertTrue(all(node.visible for node in restored.walk(restored.find_by_id(folder.uuid))))
+
+    def test_theme_dialog_applies_and_persists_application_theme(self):
+        self.assertIn(self.window.action_theme, self.window.menuTools.actions())
+        self.assertEqual(self.window.theme, "light")
+
+        def choose_dark(dialog):
+            dialog.dark_radio.setChecked(True)
+            return QDialog.DialogCode.Accepted
+
+        with patch("gui.MainWindow.ThemeDialog.exec", new=choose_dark):
+            self.window.action_theme.trigger()
+        self.assertEqual(self.window.theme, "dark")
+        self.assertEqual(self.settings.value("theme"), "dark")
+        self.assertEqual(self.window.viewer.background, "#1a2028")
+        self.assertEqual(self.app.palette().color(QPalette.ColorRole.Window).name(), "#20252d")
+        with patch("gui.MainWindow.ThemeDialog.exec", return_value=QDialog.DialogCode.Rejected):
+            self.window.action_theme.trigger()
+        self.assertEqual(self.window.theme, "dark")
+        reopened = MainWindow(settings=self.settings, restore_session=False)
+        self.addCleanup(self.close_window, reopened)
+        self.assertEqual(reopened.theme, "dark")
+        self.assertEqual(reopened.viewer.background, "#1a2028")
+
     def test_import_well_file_through_main_window(self):
         project = self.attach_project()
         source = self.directory / "wells.csv"
@@ -157,8 +203,23 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(len(project.well_files()), 1)
         self.assertEqual(len(project.wells()), 2)
         self.assertEqual(len(self.window.viewer.actors), 2)
+        editor = self.window.appearance_editor
+        self.assertFalse(editor.label_group.isHidden())
+        editor.label_font_combo.setCurrentIndex(editor.label_font_combo.findData("courier"))
+        editor.label_size_spin.setValue(24)
+        with patch("gui.custom_widgets.AppearanceEditor.QColorDialog.getColor",
+                   return_value=QColor("#345678")):
+            editor.label_color_button.click()
+        editor.label_visible_check.setChecked(False)
+        self.assertTrue(all(not well.appearance.label_visible and
+                            well.appearance.label_font == "courier" and
+                            well.appearance.label_size == 24 and
+                            well.appearance.label_color == "#345678"
+                            for well in project.wells()))
         self.window.save_project()
-        self.assertEqual(Project.open(project.project_file).well_files()[0].well_ids, ("A", "B"))
+        loaded = Project.open(project.project_file).well_files()[0]
+        self.assertEqual(loaded.well_ids, ("A", "B"))
+        self.assertFalse(loaded.appearance.label_visible)
 
     def test_delete_changes_domain_and_clears_view(self):
         project = self.attach_project()

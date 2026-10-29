@@ -290,6 +290,21 @@ class Project:
             obj.visible = bool(visible)
             self.mark_modified()
 
+    def set_subtree_visible(self, container, visible):
+        """Set a container and every descendant to one visibility state."""
+        self._require_member(container)
+        if not isinstance(container, Folder):
+            raise ValueError("Групповая видимость доступна только контейнеру.")
+        visible = bool(visible)
+        changed = False
+        for obj in self.walk(container):
+            if obj.visible != visible:
+                obj.visible = visible
+                changed = True
+        if changed:
+            self.mark_modified()
+        return changed
+
     def set_appearance(self, obj, **changes):
         self._require_member(obj)
         if isinstance(obj, (WellFile, LayeredCube)):

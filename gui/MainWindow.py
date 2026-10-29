@@ -2,12 +2,14 @@ import logging
 from pathlib import Path
 
 from PyQt6 import uic
-from PyQt6.QtCore import Qt, QSettings, QTimer
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QAction, QKeySequence, QStandardItem, QStandardItemModel
-from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QFileDialog, QMessageBox, QInputDialog, QScrollArea, QFrame
+from PyQt6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QFileDialog, QMessageBox, QInputDialog, QScrollArea, QFrame
 
 from gui.Viewer3D import Viewer3D
 from gui.dialogs.ImportDialog import ImportDialog
+from gui.dialogs.ThemeDialog import ThemeDialog
+from gui.theme import THEMES, apply_theme
 from gui.custom_widgets.projectTreeView import ProjectTreeView
 from gui.custom_widgets.AppearanceEditor import AppearanceEditor
 from gui.custom_widgets.AxisScaleEditor import AxisScaleEditor
@@ -36,6 +38,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(self.viewerWidget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.viewer)
+        saved_theme = self.settings.value("theme", "light", type=str)
+        self.set_theme(saved_theme if saved_theme in THEMES else "light", save=False)
         self.appearance_editor = AppearanceEditor(self)
         self.axis_scale_editor = AxisScaleEditor(self)
         self.propertyTree.setMaximumHeight(250)
@@ -78,6 +82,22 @@ class MainWindow(QMainWindow):
         self.action_exit = QAction("Выход", self)
         self.action_exit.triggered.connect(self.close)
         self.menu.addAction(self.action_exit)
+        self.action_theme = QAction("Тема приложения…", self)
+        self.action_theme.triggered.connect(self._open_theme_dialog)
+        self.menuTools.addAction(self.action_theme)
+
+    def set_theme(self, theme, *, save=True):
+        background = apply_theme(QApplication.instance(), theme)
+        self.viewer.set_theme(background)
+        self.theme = theme
+        if save:
+            self.settings.setValue("theme", theme)
+            self.settings.sync()
+
+    def _open_theme_dialog(self):
+        dialog = ThemeDialog(self.theme, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.set_theme(dialog.selected_theme)
 
     def replace_tree_view(self):
         old_tree = self.projectTree
@@ -140,6 +160,19 @@ class MainWindow(QMainWindow):
 
     def update_3d_viewer(self):
         self._render_project(self.project)
+
+    def set_container_visibility(self, container, visible):
+        if self.project is None:
+            return
+        try:
+            if self.project.set_subtree_visible(container, visible):
+                self.update_3d_viewer()
+                self.update_project_tree()
+                self.update_window_state()
+        except Exception as error:
+            self.update_project_tree()
+            self.update_window_state()
+            self._report_error("Не удалось изменить видимость контейнера", error)
 
     def update_project_tree(self):
         selected = self.projectTree.get_item_from_index(self.projectTree.currentIndex())
@@ -277,6 +310,13 @@ class MainWindow(QMainWindow):
         was_modified = self.project.modified
 
         def refresh():
+            if "color_map" in changes and hasattr(self.viewer, "rebuild_palette_actors"):
+                self.viewer.rebuild_palette_actors(targets)
+                return
+            if set(changes) <= {"label_visible", "label_color", "label_font", "label_size"} \
+                    and hasattr(self.viewer, "update_well_labels"):
+                self.viewer.update_well_labels(targets)
+                return
             if hasattr(self.viewer, "update_object_appearances"):
                 self.viewer.update_object_appearances(targets)
             else:
@@ -328,9 +368,6 @@ class MainWindow(QMainWindow):
             dialog = PaletteDialog(obj, self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self._change_appearance(object_id, {"color_map": dialog.palette})
-                # The modal editor can return before the OpenGL widget resumes
-                # painting. Render once more on the next GUI event-loop turn.
-                QTimer.singleShot(0, self.viewer.plotter.render)
         except Exception as error:
             self._report_error("Не удалось открыть палитру", error)
 

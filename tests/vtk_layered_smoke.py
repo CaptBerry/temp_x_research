@@ -51,9 +51,12 @@ def phase(directory, reopen):
         assert window.appearance_editor.fields.isEnabled()
         if not reopen:
             layer_actor = window.viewer.actors[model.get_layer(30).uuid]
+            layer_mesh = layer_actor.mapper.dataset
             window._change_appearance(model.uuid, {
                 "color_map": ColorMap.default("УЭС", 10, 40), "opacity": 0.65})
-            assert window.viewer.actors[model.get_layer(30).uuid] is layer_actor
+            assert window.viewer.actors[model.get_layer(30).uuid] is not layer_actor
+            layer_actor = window.viewer.actors[model.get_layer(30).uuid]
+            assert layer_actor.mapper.dataset is layer_mesh
             assert layer_actor.mapper.scalar_visibility
             project.save()
         else:

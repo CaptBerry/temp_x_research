@@ -43,7 +43,9 @@ class ContainerAppearanceTests(unittest.TestCase):
                 "wellfile", wells_table(), source, ("x", "y", "z"), ("grade",), "id"))
             palette = ColorMap.default("grade", 1, 4)
             project.set_appearance(collection, color_map=palette, color="#334455",
-                                   mode="points", point_size=9, opacity=0.6)
+                                   mode="points", point_size=9, opacity=0.6,
+                                   label_visible=False, label_color="#123456",
+                                   label_font="times", label_size=22)
             self.assertEqual(collection.numeric_fields(), ["x", "y", "z", "grade"])
             self.assertTrue(all(well.appearance == collection.appearance for well in collection.wells))
             project.save()
@@ -52,6 +54,9 @@ class ContainerAppearanceTests(unittest.TestCase):
             loaded = reopened.well_files()[0]
             self.assertIsInstance(loaded, WellFile)
             self.assertEqual(loaded.appearance.color_map, palette)
+            self.assertFalse(loaded.appearance.label_visible)
+            self.assertEqual((loaded.appearance.label_color, loaded.appearance.label_font,
+                              loaded.appearance.label_size), ("#123456", "times", 22))
             self.assertTrue(all(well.appearance == loaded.appearance for well in loaded.wells))
 
     def test_container_palette_dialog_defaults_to_common_parameter(self):

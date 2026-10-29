@@ -27,6 +27,8 @@ class Viewer3D(QWidget):
 
         # словарь акторов
         self.actors = {}
+        self.well_label_actors = {}
+        self._visible_wells = {}
 
         self.camera = SceneCamera()
         self.scene_bounds = None
@@ -59,6 +61,10 @@ class Viewer3D(QWidget):
 
         # self.demo()
 
+    def set_theme(self, background):
+        self.plotter.set_background(background)
+        self.plotter.render()
+
     def demo(self):
 
         x = np.linspace(-10, 10, 80)
@@ -82,6 +88,8 @@ class Viewer3D(QWidget):
         self.plotter.clear()
         self.plotter.show_axes()
         self.actors.clear()
+        self.well_label_actors.clear()
+        self._visible_wells.clear()
         self.scene_bounds = None
 
     @contextmanager
@@ -143,8 +151,27 @@ class Viewer3D(QWidget):
         apply_color_map(actor, well)
         self._apply_axis_scale(actor)
         self.actors[well.uuid] = actor
+        self._visible_wells[well.uuid] = well
+        self._sync_well_label(well)
         self._recompute_scene_bounds()
         return actor
+
+    def _sync_well_label(self, well):
+        previous = self.well_label_actors.pop(well.uuid, None)
+        if previous is not None:
+            self.plotter.remove_actor(previous, reset_camera=False, render=False)
+        if well.uuid not in self.actors or not well.appearance.label_visible:
+            return
+        position = np.asarray(well.coordinates[0], dtype=float) * np.asarray(self.axis_scale)
+        label = self.plotter.add_point_labels(
+            np.asarray([position]), [well.well_id], name=f"well-{well.uuid}",
+            text_color=well.appearance.label_color,
+            font_family=well.appearance.label_font,
+            font_size=well.appearance.label_size,
+            shadow=True, show_points=False, shape=None, always_visible=True,
+            reset_camera=False, render=False,
+        )
+        self.well_label_actors[well.uuid] = label
 
     def add_point_cloud(self, point_cloud):
         coordinates = point_cloud.coordinates
@@ -173,6 +200,32 @@ class Viewer3D(QWidget):
     def update_object_appearance(self, obj):
         self.update_object_appearances((obj,))
 
+    def rebuild_palette_actors(self, objects):
+        """Replace VTK mappers after a palette edit so cached GPU colors are discarded."""
+        with self.scene_update():
+            viewport = self._point_viewport()
+            for obj in objects:
+                previous = self.actors.get(obj.uuid)
+                if previous is None:
+                    continue
+                mesh = previous.mapper.dataset
+                self.plotter.remove_actor(previous, reset_camera=False, render=False)
+                actor = self.add_mesh(mesh, name=obj.uuid)
+                apply_appearance(actor, obj.appearance, viewport)
+                apply_color_map(actor, obj)
+                self._apply_axis_scale(actor)
+                self.actors[obj.uuid] = actor
+                if isinstance(obj, Well):
+                    self._sync_well_label(obj)
+            self._recompute_scene_bounds()
+            self.plotter.renderer.ResetCameraClippingRange()
+
+    def update_well_labels(self, objects):
+        with self.scene_update():
+            for obj in objects:
+                if isinstance(obj, Well) and obj.uuid in self.actors:
+                    self._sync_well_label(obj)
+
     def update_object_appearances(self, objects):
         updated = False
         viewport = self._point_viewport()
@@ -182,6 +235,8 @@ class Viewer3D(QWidget):
                 continue
             apply_appearance(actor, obj.appearance, viewport)
             apply_color_map(actor, obj)
+            if isinstance(obj, Well):
+                self._sync_well_label(obj)
             updated = True
         if updated:
             self._recompute_scene_bounds()
@@ -207,6 +262,8 @@ class Viewer3D(QWidget):
             axes.SetTotalLength(*(value / largest for value in self.axis_scale))
         for actor in self.actors.values():
             self._apply_axis_scale(actor)
+        for well in self._visible_wells.values():
+            self._sync_well_label(well)
         self._recompute_scene_bounds()
         self.plotter.renderer.ResetCameraClippingRange()
         self.plotter.render()

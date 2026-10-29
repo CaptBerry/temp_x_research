@@ -17,6 +17,10 @@ class Appearance:
     line_width: float = 1.0
     color_map: ColorMap | None = None
     opacity: float = 1.0
+    label_visible: bool = True
+    label_color: str = "#e67624"
+    label_font: str = "arial"
+    label_size: int = 16
 
     @staticmethod
     def modes(object_type):
@@ -35,7 +39,7 @@ class Appearance:
         cls.modes(object_type)
         if object_type in ("surface", "layered_cube"):
             return cls(mode="surface", outline=True)
-        if object_type == "wellfile":
+        if object_type in ("well", "wellfile"):
             return cls(mode="wireframe", color="#d95f02", point_size=5)
         return cls()
 
@@ -50,7 +54,13 @@ class Appearance:
             raise ValueError("Неизвестная форма точки.")
         if type(self.outline) is not bool:
             raise ValueError("Обводка должна быть включена или выключена.")
-        for color in (self.color, self.outline_color):
+        if type(self.label_visible) is not bool:
+            raise ValueError("Подпись скважины должна быть включена или выключена.")
+        if self.label_font not in ("arial", "times", "courier"):
+            raise ValueError("Шрифт подписи: выберите Arial, Times или Courier.")
+        if type(self.label_size) is not int or not 8 <= self.label_size <= 72:
+            raise ValueError("Размер подписи должен быть от 8 до 72 пикселей.")
+        for color in (self.color, self.outline_color, self.label_color):
             if not isinstance(color, str) or re.fullmatch(r"#[0-9a-fA-F]{6}", color) is None:
                 raise ValueError("Цвет должен иметь формат #RRGGBB.")
         for value, minimum, maximum, label in (

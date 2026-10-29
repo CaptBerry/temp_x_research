@@ -13,7 +13,7 @@ class Well(PointCloud):
     def __init__(self, name="Скважина", file_path=None, dataframe=None, well_id=None):
         super().__init__(name, file_path, dataframe)
         self.well_id = str(well_id).strip() if well_id is not None else ""
-        self.appearance = Appearance(mode="wireframe", color="#d95f02", point_size=5)
+        self.appearance = Appearance.default(self.TYPE)
 
     def validate(self):
         super().validate()

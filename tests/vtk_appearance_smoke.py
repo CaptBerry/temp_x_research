@@ -96,8 +96,9 @@ def main():
             mapped_translucent = change(cloud, opacity=0.5)
             assert color_pixels(mapped_translucent, "#0000ff") < color_pixels(colored, "#0000ff") / 2
             change(cloud, opacity=1)
-            assert window.viewer.actors[cloud.uuid] is actor
-            assert actor.mapper.dataset is geometry
+            assert window.viewer.actors[cloud.uuid] is not actor
+            assert window.viewer.actors[cloud.uuid].mapper.dataset is geometry
+            np.testing.assert_array_equal(plotter.camera_position, original_camera)
             sphere_palette = change(cloud, mode="spheres")
             blue = (sphere_palette[:, :, 2].astype(int) > sphere_palette[:, :, 0].astype(int) + 50)
             assert np.count_nonzero(blue) > 500

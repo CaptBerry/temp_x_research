@@ -43,6 +43,10 @@ class ProjectTreeView(QTreeView):
             menu.addSeparator()
             menu.addAction("Закрыть проект", window.close_project)
         elif obj is not None:
+            if isinstance(obj, Folder) and obj.children:
+                menu.addAction("Выбрать все", lambda: window.set_container_visibility(obj, True))
+                menu.addAction("Отменить выбор", lambda: window.set_container_visibility(obj, False))
+                menu.addSeparator()
             if isinstance(obj, Folder) and not isinstance(obj, (WellFile, LayeredCube)):
                 menu.addAction("Добавить папку", lambda: window.add_work_subfolder(obj))
                 menu.addAction("Импортировать объект…", lambda: window.show_import_dialog(obj))

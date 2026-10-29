@@ -92,6 +92,23 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse(reopened.is_visible(loaded))
         self.assertTrue(Path(loaded.file_path).is_relative_to(reopened.project_path))
 
+    def test_container_visibility_changes_whole_subtree_and_survives_reopen(self):
+        parent = self.project.add(Folder("Контейнер"))
+        nested = self.project.add(Folder("Вложенная"), parent)
+        cloud = self.project.import_file(self.cloud(), nested)
+        self.assertTrue(self.project.set_subtree_visible(parent, False))
+        self.assertTrue(all(not node.visible for node in (parent, nested, cloud)))
+        self.project.save()
+        reopened = Project.open(self.project.project_file)
+        loaded = reopened.find_by_id(parent.uuid)
+        self.assertFalse(reopened.modified)
+        self.assertFalse(reopened.set_subtree_visible(loaded, False))
+        self.assertFalse(reopened.modified)
+        self.assertTrue(reopened.set_subtree_visible(loaded, True))
+        self.assertTrue(all(node.visible for node in reopened.walk(loaded)))
+        with self.assertRaisesRegex(ValueError, "контейнеру"):
+            reopened.set_subtree_visible(reopened.find_by_id(cloud.uuid), False)
+
     def test_save_as_and_move_are_independent(self):
         cloud = self.project.import_file(self.cloud())
         self.project.save()
