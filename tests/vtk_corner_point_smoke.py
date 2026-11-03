@@ -63,6 +63,17 @@ def phase(directory, reopen):
         assert actor.mapper.scalar_visibility
         np.testing.assert_allclose(mesh.cell_data[PALETTE_SCALARS], [0.1, 0.3, 0.4])
         assert PALETTE_SCALARS not in mesh.point_data
+        window._change_appearance(cube.uuid, {
+            "color_map": replace(cube.appearance.color_map, filter_range=(0.25, 0.35))})
+        filtered = window.viewer.actors[cube.uuid].mapper.dataset
+        assert filtered.n_cells == 1
+        np.testing.assert_allclose(filtered.cell_data[PALETTE_SCALARS], [0.3])
+        window._change_appearance(cube.uuid, {
+            "color_map": replace(cube.appearance.color_map, filter_range=(0.8, 0.9))})
+        assert cube.uuid not in window.viewer.actors
+        window._change_appearance(cube.uuid, {
+            "color_map": replace(cube.appearance.color_map, filter_range=None)})
+        assert window.viewer.actors[cube.uuid].mapper.dataset.n_cells == 3
         generated_actor = window.viewer.actors[generated.uuid]
         assert generated_actor.mapper.dataset.n_cells == 8
         assert generated_actor.mapper.scalar_visibility

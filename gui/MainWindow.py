@@ -4,15 +4,15 @@ from pathlib import Path
 from PyQt6 import uic
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QAction, QKeySequence, QStandardItem, QStandardItemModel
-from PyQt6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QFileDialog, QMessageBox, QInputDialog, QScrollArea, QFrame
+from PyQt6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QFileDialog, QMessageBox, QInputDialog, QScrollArea, QFrame, QPushButton
 
 from gui.Viewer3D import Viewer3D
 from gui.dialogs.ImportDialog import ImportDialog
+from gui.dialogs.AxisSettingsDialog import AxisSettingsDialog
 from gui.dialogs.ThemeDialog import ThemeDialog
 from gui.theme import THEMES, apply_theme
 from gui.custom_widgets.projectTreeView import ProjectTreeView
 from gui.custom_widgets.AppearanceEditor import AppearanceEditor
-from gui.custom_widgets.AxisScaleEditor import AxisScaleEditor
 from models.project.Project import Project
 from models.project.Folder import Folder
 from models.PointCloud import PointCloud
@@ -41,9 +41,10 @@ class MainWindow(QMainWindow):
         saved_theme = self.settings.value("theme", "light", type=str)
         self.set_theme(saved_theme if saved_theme in THEMES else "light", save=False)
         self.appearance_editor = AppearanceEditor(self)
-        self.axis_scale_editor = AxisScaleEditor(self)
+        self.axis_settings_button = QPushButton("Настройка осей…", self)
+        self.axis_settings_button.clicked.connect(self._open_axis_settings)
         self.propertyTree.setMaximumHeight(250)
-        self.PropertiesPanel.layout().addWidget(self.axis_scale_editor)
+        self.PropertiesPanel.layout().addWidget(self.axis_settings_button)
         self.appearance_scroll = QScrollArea(self.PropertiesPanel)
         self.appearance_scroll.setWidgetResizable(True)
         self.appearance_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -54,7 +55,6 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([200, 550, 300])
         self.appearance_editor.appearanceChanged.connect(self._change_appearance)
         self.appearance_editor.paletteRequested.connect(self._open_palette)
-        self.axis_scale_editor.scaleChanged.connect(self._change_axis_scale)
         self._connect_actions()
         self.update_project_tree()
         self.update_window_state()
@@ -85,6 +85,9 @@ class MainWindow(QMainWindow):
         self.action_theme = QAction("Тема приложения…", self)
         self.action_theme.triggered.connect(self._open_theme_dialog)
         self.menuTools.addAction(self.action_theme)
+        self.action_axes = QAction("Настройка осей…", self)
+        self.action_axes.triggered.connect(self._open_axis_settings)
+        self.menuView.addAction(self.action_axes)
 
     def set_theme(self, theme, *, save=True):
         background = apply_theme(QApplication.instance(), theme)
@@ -108,7 +111,8 @@ class MainWindow(QMainWindow):
     def update_window_state(self):
         active = self.project is not None
         for action in (self.action_save_project, self.action_save_as_project,
-                       self.action_close_project, self.actionImportXYZ):
+                       self.action_close_project, self.actionImportXYZ,
+                       self.action_axes, self.axis_settings_button):
             action.setEnabled(active)
         name = self.project.name if active else "Нет проекта"
         self.setWindowTitle(f"{name}[*] — X Search")
@@ -143,7 +147,6 @@ class MainWindow(QMainWindow):
             self._render_project(previous)
             raise
         self.project = project
-        self.axis_scale_editor.set_project(project)
         self.update_project_tree()
         self.update_window_state()
         self._remember_project()
@@ -152,10 +155,15 @@ class MainWindow(QMainWindow):
         with self.viewer.scene_update():
             self.viewer.clear_scene()
             self.viewer.set_axis_scale(project.axis_scale if project is not None else (1, 1, 1))
+            self.viewer.set_axes_display(project.axes_visible if project is not None else True,
+                                         project.axes_grid_visible if project is not None else False)
+            self.viewer.set_axes_format(project.axes_label_decimals if project is not None else 2,
+                                        project.axes_round_grid if project is not None else False)
             if project is not None:
                 for obj in project.walk():
                     if project.is_visible(obj):
                         self.viewer.add_object(obj)
+                self.viewer.update_coordinate_axes()
                 self.viewer.focus_on_scene()
 
     def update_3d_viewer(self):
@@ -263,6 +271,12 @@ class MainWindow(QMainWindow):
                 elif isinstance(obj, DataCube):
                     if "layer_index" in obj.metadata:
                         values["Индекс слоя"] = obj.metadata["layer_index"]
+                        values["Название слоя"] = obj.metadata.get("layer_name", obj.name)
+                        if "median_height" in obj.metadata:
+                            values["Медианная абсолютная высота"] = f'{obj.metadata["median_height"]:.3f}'
+                            values["Диапазон абсолютной высоты"] = (
+                                f'{obj.metadata["height_min"]:.3f}…'
+                                f'{obj.metadata["height_max"]:.3f}')
                     if obj.is_corner_point:
                         values.update({"Геометрия": "Corner-point grid (COORD/ZCORN)",
                                        "Размеры I×J×K": "×".join(map(str, obj.grid_shape)),
@@ -283,7 +297,9 @@ class MainWindow(QMainWindow):
                 elif isinstance(obj, LayeredCube):
                     values.update({"Слоёв": len(obj.layers), "Колонка слоя": obj.layer_column,
                                    "Кровля": obj.roof_column, "Подошва": obj.base_column,
-                                   "Индексы": ", ".join(str(layer.metadata["layer_index"])
+                                   "Слои сверху вниз": ", ".join(
+                                       f'{layer.metadata["layer_index"]}: '
+                                       f'{layer.metadata.get("layer_name", layer.name)}'
                                                         for layer in obj.layers)})
                 elif isinstance(obj, Surface):
                     kind = {"general": "Обычная", "section": "Разрез", "fault": "Трещина"}.get(obj.surface_kind, obj.surface_kind)
@@ -353,7 +369,41 @@ class MainWindow(QMainWindow):
             except Exception:
                 logger.exception("Не удалось восстановить масштаб осей")
             self._report_error("Не удалось изменить масштаб осей", error)
-        self.axis_scale_editor.set_project(self.project)
+        self.update_window_state()
+
+    def _open_axis_settings(self):
+        if self.project is None:
+            return
+        dialog = AxisSettingsDialog(self.project, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        previous = (self.project.axis_scale, self.project.axes_visible,
+                    self.project.axes_grid_visible, self.project.axes_label_decimals,
+                    self.project.axes_round_grid, self.project.modified)
+        try:
+            if self.project.set_axes_settings(dialog.axis_scale,
+                                              dialog.axes_check.isChecked(),
+                                              dialog.grid_check.isChecked(),
+                                              label_decimals=dialog.decimals_spin.value(),
+                                              round_grid=dialog.round_grid_check.isChecked()):
+                with self.viewer.scene_update():
+                    self.viewer.set_axis_scale(self.project.axis_scale)
+                    self.viewer.set_axes_display(self.project.axes_visible,
+                                                 self.project.axes_grid_visible)
+                    self.viewer.set_axes_format(self.project.axes_label_decimals,
+                                                self.project.axes_round_grid)
+        except Exception as error:
+            (self.project.axis_scale, self.project.axes_visible,
+             self.project.axes_grid_visible, self.project.axes_label_decimals,
+             self.project.axes_round_grid, self.project.modified) = previous
+            try:
+                with self.viewer.scene_update():
+                    self.viewer.set_axis_scale(previous[0])
+                    self.viewer.set_axes_display(previous[1], previous[2])
+                    self.viewer.set_axes_format(previous[3], previous[4])
+            except Exception:
+                logger.exception("Не удалось восстановить настройки осей")
+            self._report_error("Не удалось изменить настройки осей", error)
         self.update_window_state()
 
     def _open_palette(self, object_id):

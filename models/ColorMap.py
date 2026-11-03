@@ -30,6 +30,7 @@ class ColorMap:
     interpolation: int = 0
     opacity_stops: tuple[OpacityStop, ...] = ()
     value_scale: str = "linear"
+    filter_range: tuple[float, float] | None = None
 
     @classmethod
     def default(cls, field, minimum, maximum):
@@ -49,6 +50,14 @@ class ColorMap:
             raise ValueError("Неизвестная шкала значений палитры.")
         if self.value_scale == "log" and self.minimum <= 0:
             raise ValueError("Для логарифмической палитры оба предела должны быть положительными.")
+        if self.filter_range is not None:
+            if (not isinstance(self.filter_range, tuple) or len(self.filter_range) != 2
+                    or any(type(value) not in (int, float) or not math.isfinite(value)
+                           for value in self.filter_range)
+                    or self.filter_range[0] > self.filter_range[1]):
+                raise ValueError("Нижняя граница фильтра должна быть не больше верхней.")
+            if self.value_scale == "log" and self.filter_range[0] <= 0:
+                raise ValueError("Для логарифмической палитры фильтр должен быть положительным.")
         if len(self.stops) < 2 or len(self.stops) > 10000:
             raise ValueError("Палитра должна содержать от 2 до 10000 цветовых узлов.")
         for nodes in (self.stops, self.opacity_stops):
@@ -79,7 +88,8 @@ class ColorMap:
                          tuple(ColorStop(**s) for s in data["stops"]),
                          data.get("interpolation", 0),
                          tuple(OpacityStop(**s) for s in data.get("opacity_stops", [])),
-                         data.get("value_scale", "linear"))
+                         data.get("value_scale", "linear"),
+                         (tuple(data["filter_range"]) if data.get("filter_range") is not None else None))
             result.validate()
             return result
         except (KeyError, TypeError, AttributeError) as error:

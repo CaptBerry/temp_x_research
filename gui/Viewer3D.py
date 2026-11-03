@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from itertools import product
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from pyvistaqt import QtInteractor
@@ -6,15 +7,18 @@ import logging
 
 import numpy as np
 import pyvista as pv
+from vtkmodules.vtkCommonCore import vtkStringArray
 
 from scene.camera import SceneCamera
+from scene.axis_ticks import readable_axis_labels, rounded_axis_range
 from models.PointCloud import PointCloud
 from models.DataCube import DataCube
 from models.Surface import Surface
 from models.Well import Well
 from renderers.surface_renderer import SurfaceRenderer
 from renderers.corner_point_renderer import render_corner_point_grid
-from renderers.appearance import apply_appearance, apply_color_map, set_point_viewport
+from renderers.appearance import (apply_appearance, apply_color_map,
+                                  filtered_palette_mesh, set_point_viewport)
 
 
 logger = logging.getLogger(__name__)
@@ -27,12 +31,21 @@ class Viewer3D(QWidget):
 
         # словарь акторов
         self.actors = {}
+        self._source_meshes = {}
         self.well_label_actors = {}
         self._visible_wells = {}
 
         self.camera = SceneCamera()
         self.scene_bounds = None
         self.axis_scale = (1.0, 1.0, 1.0)
+        self.axes_visible = True
+        self.axes_grid_visible = False
+        self.axes_label_decimals = 2
+        self.axes_round_grid = False
+        self.axes_color = "#30343a"
+        self.bounds_axes_actor = None
+        self._axis_base_labels = ()
+        self._axis_visible_labels = [None, None, None]
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -63,7 +76,10 @@ class Viewer3D(QWidget):
 
     def set_theme(self, background):
         self.plotter.set_background(background)
-        self.plotter.render()
+        self.axes_color = ("#edf1f7" if np.mean(pv.Color(background).float_rgb) < 0.5
+                           else "#30343a")
+        with self.scene_update():
+            self.update_coordinate_axes()
 
     def demo(self):
 
@@ -88,9 +104,13 @@ class Viewer3D(QWidget):
         self.plotter.clear()
         self.plotter.show_axes()
         self.actors.clear()
+        self._source_meshes.clear()
         self.well_label_actors.clear()
         self._visible_wells.clear()
         self.scene_bounds = None
+        self.bounds_axes_actor = None
+        self._axis_base_labels = ()
+        self._axis_visible_labels = [None, None, None]
 
     @contextmanager
     def scene_update(self):
@@ -119,6 +139,9 @@ class Viewer3D(QWidget):
             return self.add_point_cloud(obj)
         if isinstance(obj, Surface) and len(obj.vertices):
             mesh = SurfaceRenderer().render(obj)
+            mesh = self._display_mesh(obj, mesh)
+            if mesh is None:
+                return None
             actor = self.add_mesh(mesh, name=obj.uuid)
             apply_appearance(actor, obj.appearance, self._point_viewport())
             apply_color_map(actor, obj)
@@ -129,6 +152,9 @@ class Viewer3D(QWidget):
 
     def add_corner_point_cube(self, cube):
         mesh = render_corner_point_grid(cube.corner_grid)
+        mesh = self._display_mesh(cube, mesh)
+        if mesh is None:
+            return None
         actor = self.add_mesh(mesh, name=cube.uuid)
         apply_appearance(actor, cube.appearance, self._point_viewport())
         apply_color_map(actor, cube)
@@ -142,7 +168,17 @@ class Viewer3D(QWidget):
         if coordinates is None or len(coordinates) < 2:
             return None
         mesh = pv.PolyData(coordinates)
-        mesh.lines = np.r_[len(coordinates), np.arange(len(coordinates))]
+        # Independent segments allow a value filter to hide only the excluded
+        # part of a well instead of dropping its entire polyline.
+        mesh.verts = np.empty(0, dtype=np.int64)
+        segments = np.column_stack((np.full(len(coordinates) - 1, 2),
+                                    np.arange(len(coordinates) - 1),
+                                    np.arange(1, len(coordinates))))
+        mesh.lines = segments.ravel()
+        self._visible_wells[well.uuid] = well
+        mesh = self._display_mesh(well, mesh)
+        if mesh is None:
+            return None
         actor = self.plotter.add_mesh(
             mesh, name=well.uuid, reset_camera=False, render=False,
             show_scalar_bar=False,
@@ -151,7 +187,6 @@ class Viewer3D(QWidget):
         apply_color_map(actor, well)
         self._apply_axis_scale(actor)
         self.actors[well.uuid] = actor
-        self._visible_wells[well.uuid] = well
         self._sync_well_label(well)
         self._recompute_scene_bounds()
         return actor
@@ -162,7 +197,8 @@ class Viewer3D(QWidget):
             self.plotter.remove_actor(previous, reset_camera=False, render=False)
         if well.uuid not in self.actors or not well.appearance.label_visible:
             return
-        position = np.asarray(well.coordinates[0], dtype=float) * np.asarray(self.axis_scale)
+        first_visible = self.actors[well.uuid].mapper.dataset.points[0]
+        position = np.asarray(first_visible, dtype=float) * np.asarray(self.axis_scale)
         label = self.plotter.add_point_labels(
             np.asarray([position]), [well.well_id], name=f"well-{well.uuid}",
             text_color=well.appearance.label_color,
@@ -180,6 +216,9 @@ class Viewer3D(QWidget):
             return None
 
         mesh = pv.PolyData(coordinates)
+        mesh = self._display_mesh(point_cloud, mesh)
+        if mesh is None:
+            return None
         actor = self.plotter.add_points(
             mesh,
             name=point_cloud.uuid,
@@ -197,6 +236,11 @@ class Viewer3D(QWidget):
 
         return actor
 
+    def _display_mesh(self, obj, source):
+        self._source_meshes[obj.uuid] = source
+        filtered = filtered_palette_mesh(source, obj)
+        return filtered if filtered.n_cells else None
+
     def update_object_appearance(self, obj):
         self.update_object_appearances((obj,))
 
@@ -206,10 +250,17 @@ class Viewer3D(QWidget):
             viewport = self._point_viewport()
             for obj in objects:
                 previous = self.actors.get(obj.uuid)
-                if previous is None:
+                source = self._source_meshes.get(obj.uuid)
+                if source is None:
                     continue
-                mesh = previous.mapper.dataset
-                self.plotter.remove_actor(previous, reset_camera=False, render=False)
+                if previous is not None:
+                    self.plotter.remove_actor(previous, reset_camera=False, render=False)
+                mesh = filtered_palette_mesh(source, obj)
+                if not mesh.n_cells:
+                    self.actors.pop(obj.uuid, None)
+                    if isinstance(obj, Well):
+                        self._sync_well_label(obj)
+                    continue
                 actor = self.add_mesh(mesh, name=obj.uuid)
                 apply_appearance(actor, obj.appearance, viewport)
                 apply_color_map(actor, obj)
@@ -218,6 +269,7 @@ class Viewer3D(QWidget):
                 if isinstance(obj, Well):
                     self._sync_well_label(obj)
             self._recompute_scene_bounds()
+            self.update_coordinate_axes()
             self.plotter.renderer.ResetCameraClippingRange()
 
     def update_well_labels(self, objects):
@@ -255,18 +307,98 @@ class Viewer3D(QWidget):
         actor.scale = self.axis_scale
 
     def set_axis_scale(self, scale):
-        self.axis_scale = tuple(scale)
-        axes = self.plotter.renderer.axes_actor
-        if axes is not None:
-            largest = max(self.axis_scale)
-            axes.SetTotalLength(*(value / largest for value in self.axis_scale))
-        for actor in self.actors.values():
-            self._apply_axis_scale(actor)
-        for well in self._visible_wells.values():
-            self._sync_well_label(well)
-        self._recompute_scene_bounds()
-        self.plotter.renderer.ResetCameraClippingRange()
-        self.plotter.render()
+        with self.scene_update():
+            self.axis_scale = tuple(scale)
+            axes = self.plotter.renderer.axes_actor
+            if axes is not None:
+                largest = max(self.axis_scale)
+                axes.SetTotalLength(*(value / largest for value in self.axis_scale))
+            for actor in self.actors.values():
+                self._apply_axis_scale(actor)
+            for well in self._visible_wells.values():
+                self._sync_well_label(well)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
+
+    def set_axes_display(self, visible, grid_visible):
+        with self.scene_update():
+            self.axes_visible = visible
+            self.axes_grid_visible = grid_visible
+            self.update_coordinate_axes()
+
+    def set_axes_format(self, decimals, round_grid):
+        with self.scene_update():
+            self.axes_label_decimals = decimals
+            self.axes_round_grid = round_grid
+            self.update_coordinate_axes()
+
+    def update_coordinate_axes(self):
+        if self.bounds_axes_actor is not None:
+            self.plotter.remove_bounds_axes()
+            self.bounds_axes_actor = None
+        if not self.axes_visible or self.scene_bounds is None:
+            return
+        coordinate_bounds = [
+            value / self.axis_scale[index // 2]
+            for index, value in enumerate(self.scene_bounds)]
+        display_bounds = list(self.scene_bounds)
+        label_counts = [5, 5, 5]
+        if self.axes_round_grid:
+            for axis in range(3):
+                start = 2 * axis
+                (lower, upper), label_counts[axis] = rounded_axis_range(
+                    coordinate_bounds[start], coordinate_bounds[start + 1],
+                    self.axes_label_decimals)
+                coordinate_bounds[start:start + 2] = (lower, upper)
+                display_bounds[start:start + 2] = (
+                    lower * self.axis_scale[axis], upper * self.axis_scale[axis])
+        self.bounds_axes_actor = self.plotter.show_bounds(
+            bounds=display_bounds, axes_ranges=coordinate_bounds,
+            xtitle="X", ytitle="Y", ztitle="Z",
+            n_xlabels=label_counts[0], n_ylabels=label_counts[1],
+            n_zlabels=label_counts[2],
+            grid="back" if self.axes_grid_visible else None,
+            location="outer", ticks="outside", color=self.axes_color,
+            font_size=14, bold=False, fmt=f"%.{self.axes_label_decimals}f",
+            use_3d_text=False,
+            render=False)
+        original_labels = []
+        for axis in range(3):
+            labels = self.bounds_axes_actor.GetAxisLabels(axis)
+            original_labels.append(tuple(labels.GetValue(i)
+                                         for i in range(labels.GetNumberOfValues())))
+        self._axis_base_labels = tuple(original_labels)
+        self._axis_visible_labels = [None, None, None]
+
+    def _axis_screen_length(self, axis):
+        bounds = self.bounds_axes_actor.GetBounds()
+        other_axes = [index for index in range(3) if index != axis]
+        renderer = self.plotter.renderer
+        lengths = []
+        for corners in product((0, 1), repeat=2):
+            points = []
+            for endpoint in (0, 1):
+                choices = {axis: endpoint, **dict(zip(other_axes, corners))}
+                world = [bounds[2 * index + choices[index]] for index in range(3)]
+                renderer.SetWorldPoint(*world, 1.0)
+                renderer.WorldToDisplay()
+                points.append(renderer.GetDisplayPoint()[:2])
+            lengths.append(float(np.linalg.norm(np.asarray(points[1]) - points[0])))
+        return min((length for length in lengths if np.isfinite(length)), default=0.0)
+
+    def _update_axis_label_visibility(self):
+        if self.bounds_axes_actor is None or not self._axis_base_labels:
+            return
+        for axis, labels in enumerate(self._axis_base_labels):
+            visible = readable_axis_labels(labels, self._axis_screen_length(axis))
+            if visible == self._axis_visible_labels[axis]:
+                continue
+            strings = vtkStringArray()
+            for label in visible:
+                strings.InsertNextValue(label)
+            self.bounds_axes_actor.SetAxisLabels(axis, strings)
+            self._axis_visible_labels[axis] = visible
 
     def _point_viewport(self):
         renderer = self.plotter.renderer
@@ -279,6 +411,7 @@ class Viewer3D(QWidget):
                 if actor.prop.style == "Points":
                     set_point_viewport(actor, viewport)
             self._last_viewport = viewport
+        self._update_axis_label_visibility()
 
     def add_mesh(self, mesh, **kwargs):
         kwargs.setdefault("show_scalar_bar", False)

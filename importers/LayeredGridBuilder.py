@@ -104,16 +104,17 @@ def build_layered_cube(dataframe, source, coordinates, parameters, layer_column,
     fields = [name for name in fields if name not in (x_name, y_name, layer_column)]
     numeric = {}
     for name in fields:
-        if name not in dataframe or str(name) in ("I", "J", "K", "N_POINTS", "x", "y", "z"):
+        if name not in dataframe or str(name) in ("I", "J", "K", "N_POINTS", "LAYER_INDEX", "x", "y", "z"):
             raise ValueError(f"Некорректная колонка параметра: {name}")
         values = pd.to_numeric(dataframe[name], errors="coerce").to_numpy(dtype=float)
         if not np.isfinite(values).any():
             raise ValueError(f"Параметр {name} не содержит числовых значений.")
         numeric[name] = values
 
+    layer_count = identifiers.nunique()
     unique_x, unique_y = (np.unique(xy[:, axis]) for axis in range(2))
     unique_xy = len(np.unique(xy, axis=0))
-    rows = (not any(dimensions[:2]) and len(unique_x) * len(unique_y) <= MAX_GRID_CELLS
+    rows = (not any(dimensions[:2]) and len(unique_x) * len(unique_y) * layer_count <= MAX_GRID_CELLS
             and len(unique_x) * len(unique_y) <= 2 * unique_xy)
     if rows:
         x_edges, y_edges = _edges(unique_x, singleton_size), _edges(unique_y, singleton_size)
@@ -122,13 +123,22 @@ def build_layered_cube(dataframe, source, coordinates, parameters, layer_column,
     else:
         unique_positions = np.unique(xy, axis=0)
         points = np.column_stack((unique_positions, np.zeros(len(unique_positions))))
-        nx, ny, _ = _uniform_dimensions(points, (dimensions[0], dimensions[1], 1))
+        budget = MAX_GRID_CELLS // layer_count
+        nx, ny, _ = _uniform_dimensions(points, (dimensions[0], dimensions[1], 1),
+                                        max_cells=budget)
+        sizes = [nx, ny]
+        while sizes[0] * sizes[1] > budget:
+            adjustable = [axis for axis in range(2) if dimensions[axis] == 0 and sizes[axis] > 1]
+            if not adjustable:
+                raise ValueError("Послойная сетка превышает предел числа ячеек.")
+            axis = max(adjustable, key=lambda candidate: sizes[candidate])
+            sizes[axis] -= 1
+        nx, ny = sizes
         x_edges = _axis_edges(xy[:, 0], nx, singleton_size)
         y_edges = _axis_edges(xy[:, 1], ny, singleton_size)
         ix, iy = (np.clip(np.searchsorted(edges, xy[:, axis], side="right") - 1,
                           0, len(edges) - 2) for axis, edges in enumerate((x_edges, y_edges)))
         method = "uniform"
-    layer_count = identifiers.nunique()
     if (len(x_edges) - 1) * (len(y_edges) - 1) * layer_count > MAX_GRID_CELLS:
         raise ValueError("Послойная сетка превышает предел числа ячеек.")
 
@@ -136,6 +146,7 @@ def build_layered_cube(dataframe, source, coordinates, parameters, layer_column,
     collection = LayeredCube(source.stem, layer_column, roof_column, base_column)
     collection.metadata.update({"source_name": source.name, "grid_build_method": method})
     identifier_values = identifiers.to_numpy()
+    statistics = []
     for raw_index in pd.unique(identifiers):
         index = raw_index.item() if isinstance(raw_index, np.generic) else raw_index
         if isinstance(index, float) and index.is_integer():
@@ -143,12 +154,26 @@ def build_layered_cube(dataframe, source, coordinates, parameters, layer_column,
         if not isinstance(index, (str, int, float, bool)):
             index = str(index)
         positions = np.flatnonzero(identifier_values == raw_index)
+        heights = (roof[positions] + base[positions]) / 2
+        statistics.append((raw_index, index, positions,
+                           float(np.median(roof[positions])),
+                           float(np.median(base[positions])),
+                           float(np.median(heights)),
+                           float(np.min(heights)), float(np.max(heights))))
+    statistics.sort(key=lambda entry: (-entry[3], -entry[5], str(entry[1])))
+    for order, (_, name, positions, roof_median, base_median,
+                centre_median, height_min, height_max) in enumerate(statistics, 1):
         grid = _layer_grid(x_edges, y_edges, ix[positions], iy[positions],
                            roof[positions], base[positions],
-                           {name: values[positions] for name, values in numeric.items()})
-        layer = DataCube(f"Слой {index}")
+                           {**{field: values[positions] for field, values in numeric.items()},
+                            "LAYER_INDEX": np.full(len(positions), order, dtype=float)})
+        layer = DataCube(f"{order}. {name}")
         layer.set_corner_grid(grid)
-        layer.metadata.update({"layer_index": index, "source_point_count": len(positions),
+        layer.metadata.update({"layer_index": order, "layer_name": str(name),
+                               "source_point_count": len(positions),
+                               "median_roof": roof_median, "median_base": base_median,
+                               "median_height": centre_median,
+                               "height_min": height_min, "height_max": height_max,
                                "grid_build_method": method})
         collection._add(layer)
     collection.validate()

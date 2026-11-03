@@ -54,6 +54,34 @@ class ProjectTests(unittest.TestCase):
             self.assertEqual(reopened.axis_scale, (2, 0.5, 4))
             self.assertFalse(reopened.modified)
 
+    def test_coordinate_axes_settings_are_atomic_and_persist(self):
+        self.assertTrue(self.project.axes_visible)
+        self.assertFalse(self.project.axes_grid_visible)
+        self.assertTrue(self.project.set_axes_settings(
+            (2, 0.5, 4), False, True, label_decimals=0, round_grid=True))
+        self.assertFalse(self.project.set_axes_settings(
+            (2, 0.5, 4), False, True, label_decimals=0, round_grid=True))
+        self.project.save()
+        reopened = Project.open(self.project.project_file)
+        self.assertEqual(reopened.axis_scale, (2, 0.5, 4))
+        self.assertFalse(reopened.axes_visible)
+        self.assertTrue(reopened.axes_grid_visible)
+        self.assertEqual(reopened.axes_label_decimals, 0)
+        self.assertTrue(reopened.axes_round_grid)
+        for scale, visible, grid in (((0, 1, 1), True, False),
+                                     ((1, 1, 1), "yes", False),
+                                     ((1, 1, 1), True, 1)):
+            with self.assertRaises(ValueError):
+                reopened.set_axes_settings(scale, visible, grid)
+            self.assertEqual((reopened.axis_scale, reopened.axes_visible,
+                              reopened.axes_grid_visible), ((2, 0.5, 4), False, True))
+            self.assertFalse(reopened.modified)
+        for decimals, round_grid in ((-1, True), (10, True), (True, True), (2, "yes")):
+            with self.assertRaises(ValueError):
+                reopened.set_axes_settings((1, 1, 1), True, False,
+                                           label_decimals=decimals, round_grid=round_grid)
+            self.assertEqual((reopened.axes_label_decimals, reopened.axes_round_grid), (0, True))
+
     def test_old_per_object_scale_migrates_to_axes(self):
         cloud = self.project.import_file(self.cloud())
         self.project.save()

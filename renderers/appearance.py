@@ -3,9 +3,30 @@
 import numpy as np
 import pyvista as pv
 from models.DataCube import DataCube
+from models.Surface import Surface
 
 
 PALETTE_SCALARS = "_xsearch_palette_values"
+
+
+def filtered_palette_mesh(mesh, obj):
+    """Return only the primitives inside a palette's optional value interval."""
+    palette = obj.appearance.color_map
+    if palette is None or palette.filter_range is None:
+        return mesh
+    cell_scalars = isinstance(obj, DataCube) and obj.is_corner_point
+    values = np.asarray(obj.color_values(palette.field), dtype=float)
+    data = mesh.cell_data if cell_scalars else mesh.point_data
+    data[PALETTE_SCALARS] = values
+    if isinstance(obj, Surface):
+        # Clip faces at the requested values so the remaining surface reaches
+        # the interval boundary instead of disappearing one whole face early.
+        lower, upper = palette.filter_range
+        clipped = mesh.clip_scalar(scalars=PALETTE_SCALARS, value=lower, invert=False)
+        return clipped.clip_scalar(scalars=PALETTE_SCALARS, value=upper, invert=True)
+    return mesh.threshold(palette.filter_range, scalars=PALETTE_SCALARS,
+                          preference="cell" if cell_scalars else "point",
+                          all_scalars=True)
 
 
 def apply_color_map(actor, obj):
@@ -16,9 +37,12 @@ def apply_color_map(actor, obj):
         mapper.Modified()
         actor.Modified()
         return
-    values = obj.color_values(palette.field)
     cell_scalars = isinstance(obj, DataCube) and obj.is_corner_point
     data = mapper.dataset.cell_data if cell_scalars else mapper.dataset.point_data
+    # Thresholding copies the selected scalar values onto its output. The
+    # original object's array is longer than a filtered mesh's point/cell set.
+    values = (np.asarray(data[PALETTE_SCALARS], dtype=float)
+              if palette.filter_range is not None else obj.color_values(palette.field))
     if palette.value_scale == "log":
         # Logarithms are undefined for zero and negative samples. Show them
         # with the lookup table's NaN color instead of the lowest palette color.

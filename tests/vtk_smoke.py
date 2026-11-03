@@ -1,6 +1,7 @@
 """Run separately on a Windows desktop: python -B -m tests.vtk_smoke."""
 
 import os
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
@@ -38,7 +39,8 @@ def run_phase(directory, phase):
             project.set_appearance(cloud, mode="points", color="#e11d48", point_size=12,
                                    outline=True, outline_color="#182b49", line_width=2,
                                    opacity=0.65)
-            project.set_axis_scale(1.5, 0.75, 2)
+            project.set_axes_settings((1.5, 0.75, 2), True, True,
+                                      label_decimals=0, round_grid=True)
             surface = Surface("Triangle")
             surface.vertices = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
             surface.faces = np.array([3, 0, 1, 2])
@@ -84,6 +86,15 @@ def run_phase(directory, phase):
                        and window.viewer.actors[well.uuid].mapper.dataset is meshes_before[well.uuid]
                        and window.viewer.actors[well.uuid].mapper.scalar_visibility
                        for well in well_file.wells)
+            window._change_appearance(well_file.uuid, {
+                "color_map": replace(well_file.appearance.color_map, filter_range=(1, 2))})
+            first, second = well_file.wells
+            assert window.viewer.actors[first.uuid].mapper.dataset.n_cells == 1
+            assert second.uuid not in window.viewer.actors
+            assert second.uuid not in window.viewer.well_label_actors
+            window._change_appearance(well_file.uuid, {
+                "color_map": replace(well_file.appearance.color_map, filter_range=None)})
+            assert all(well.uuid in window.viewer.actors for well in well_file.wells)
             window.set_container_visibility(well_file, False)
             assert all(well.uuid not in window.viewer.actors for well in well_file.wells)
             window.set_container_visibility(well_file, True)
@@ -110,6 +121,17 @@ def run_phase(directory, phase):
             pd.testing.assert_frame_equal(cloud.dataframe, CsvImporter().load(fixture), check_exact=True)
         app.processEvents()
         assert cloud.uuid in window.viewer.actors
+        assert window.project.axes_grid_visible
+        assert window.viewer.bounds_axes_actor.GetDrawXGridlines()
+        assert window.project.axes_label_decimals == 0
+        assert window.project.axes_round_grid
+        axis_labels = window.viewer.bounds_axes_actor.GetAxisLabels(0)
+        assert axis_labels.GetNumberOfValues() >= 4
+        assert axis_labels.GetValue(0) == ""
+        assert axis_labels.GetValue(axis_labels.GetNumberOfValues() - 1) == ""
+        assert any(axis_labels.GetValue(i) for i in range(1, axis_labels.GetNumberOfValues() - 1))
+        assert all("." not in axis_labels.GetValue(i)
+                   for i in range(axis_labels.GetNumberOfValues()))
         assert surface.uuid in window.viewer.actors
         assert len(window.viewer.actors) == 5
         for well in window.project.wells():

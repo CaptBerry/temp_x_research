@@ -8,8 +8,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPolygonF
 from PyQt6.QtCore import QPointF
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QListWidget, QMessageBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMessageBox,
     QPushButton, QVBoxLayout, QWidget, QColorDialog,
     QSlider,
 )
@@ -83,7 +83,7 @@ class PaletteDialog(QDialog):
     def __init__(self, obj, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Палитра")
-        self.resize(610, 480)
+        self.resize(680, 580)
         self.obj = obj
         self.palette = obj.appearance.color_map
         self._loading = False
@@ -139,6 +139,20 @@ class PaletteDialog(QDialog):
         layout.addLayout(form)
         self.gradient = GradientStrip()
         layout.addWidget(self.gradient)
+        filter_group = QGroupBox("Фильтр отображения")
+        filter_layout = QFormLayout(filter_group)
+        self.filter_check = QCheckBox("Показывать только значения в интервале")
+        self.filter_minimum_spin = self._number_spin()
+        self.filter_maximum_spin = self._number_spin()
+        self.filter_reset_button = QPushButton("Диапазон по данным")
+        filter_limits = QHBoxLayout()
+        filter_limits.addWidget(self.filter_minimum_spin)
+        filter_limits.addWidget(QLabel("—"))
+        filter_limits.addWidget(self.filter_maximum_spin)
+        filter_limits.addWidget(self.filter_reset_button)
+        filter_layout.addRow(self.filter_check)
+        filter_layout.addRow("От — до", filter_limits)
+        layout.addWidget(filter_group)
         layout.addWidget(QLabel("Узлы: перетащите маркер, чтобы изменить его положение"))
         middle = QHBoxLayout()
         self.stop_list = QListWidget()
@@ -180,6 +194,10 @@ class PaletteDialog(QDialog):
         self.minimum_slider.valueChanged.connect(lambda n: self._slider_changed(n, True))
         self.maximum_slider.valueChanged.connect(lambda n: self._slider_changed(n, False))
         self.scale_combo.currentIndexChanged.connect(self._scale_changed)
+        self.filter_check.toggled.connect(self._filter_changed)
+        self.filter_minimum_spin.valueChanged.connect(self._filter_changed)
+        self.filter_maximum_spin.valueChanged.connect(self._filter_changed)
+        self.filter_reset_button.clicked.connect(self._reset_filter)
         self.interpolation_combo.currentIndexChanged.connect(self._method_changed)
         self.stop_list.currentRowChanged.connect(self._select)
         self.gradient.stopSelected.connect(self.stop_list.setCurrentRow)
@@ -213,6 +231,15 @@ class PaletteDialog(QDialog):
             self.scale_combo.setCurrentIndex(self.scale_combo.findData(self.palette.value_scale))
             self.minimum_spin.setValue(self.palette.minimum)
             self.maximum_spin.setValue(self.palette.maximum)
+            active_filter = self.palette.filter_range is not None
+            self.filter_check.setChecked(active_filter)
+            for spin in (self.filter_minimum_spin, self.filter_maximum_spin):
+                spin.setMinimum(1e-15 if logarithmic else -1e15)
+                spin.setEnabled(active_filter)
+            filter_min, filter_max = self.palette.filter_range or (self.palette.minimum, self.palette.maximum)
+            self.filter_minimum_spin.setValue(filter_min)
+            self.filter_maximum_spin.setValue(filter_max)
+            self.filter_reset_button.setEnabled(active_filter)
             low, high = self._slider_domain
             self.minimum_slider.setValue(self._slider_index(self.palette.minimum))
             self.maximum_slider.setValue(self._slider_index(self.palette.maximum))
@@ -294,7 +321,9 @@ class PaletteDialog(QDialog):
                 self._refresh(self.stop_list.currentRow())
                 QMessageBox.warning(self, "Недоступная шкала", str(error))
                 return
-            self.palette = replace(self.palette, field=field, minimum=minimum, maximum=maximum)
+            filter_range = (minimum, maximum) if self.palette.filter_range is not None else None
+            self.palette = replace(self.palette, field=field, minimum=minimum,
+                                   maximum=maximum, filter_range=filter_range)
             self._set_slider_domain()
             self._refresh(self.stop_list.currentRow())
 
@@ -328,11 +357,30 @@ class PaletteDialog(QDialog):
                 return
             minimum = self.palette.minimum if self.palette.minimum > 0 else positive_minimum
             maximum = max(self.palette.maximum, positive_maximum, minimum * (1 + 1e-12))
+            filter_range = self.palette.filter_range
+            if filter_range is not None and filter_range[0] <= 0:
+                filter_range = (minimum, max(minimum, filter_range[1]))
             self.palette = replace(self.palette, value_scale=value_scale,
-                                   minimum=minimum, maximum=maximum)
+                                   minimum=minimum, maximum=maximum,
+                                   filter_range=filter_range)
         else:
             self.palette = replace(self.palette, value_scale=value_scale)
         self._set_slider_domain()
+        self._refresh(self.stop_list.currentRow())
+
+    def _filter_changed(self, *args):
+        if self._loading:
+            return
+        active = self.filter_check.isChecked()
+        self.palette = replace(self.palette, filter_range=(
+            self.filter_minimum_spin.value(), self.filter_maximum_spin.value()) if active else None)
+        for widget in (self.filter_minimum_spin, self.filter_maximum_spin,
+                       self.filter_reset_button):
+            widget.setEnabled(active)
+
+    def _reset_filter(self):
+        bounds = self._data_range(self.palette.field, self.palette.value_scale)
+        self.palette = replace(self.palette, filter_range=bounds)
         self._refresh(self.stop_list.currentRow())
 
     def _set_slider_domain(self):
@@ -385,7 +433,8 @@ class PaletteDialog(QDialog):
             try:
                 loaded = load_surfer_clr(path, self.field_combo.currentData(),
                                          self.minimum_spin.value(), self.maximum_spin.value())
-                self.palette = replace(loaded, value_scale=self.palette.value_scale)
+                self.palette = replace(loaded, value_scale=self.palette.value_scale,
+                                       filter_range=self.palette.filter_range)
                 self.palette.validate()
                 self._refresh(0)
             except (OSError, UnicodeError, ValueError) as error:

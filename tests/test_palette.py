@@ -7,13 +7,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
+import pyvista as pv
 from PyQt6.QtWidgets import QApplication, QDialog
 
 from gui.dialogs.PaletteDialog import PaletteDialog
 from models.ColorMap import ColorMap, ColorStop, load_surfer_clr
 from models.PointCloud import PointCloud
+from models.Surface import Surface
 from models.project.Project import Project
+from renderers.appearance import PALETTE_SCALARS, filtered_palette_mesh
 
 
 class PaletteTests(unittest.TestCase):
@@ -66,11 +70,71 @@ class PaletteTests(unittest.TestCase):
         self.assertEqual(ColorMap.from_dict(palette.to_dict()), palette)
         legacy = palette.to_dict()
         legacy.pop("value_scale")
+        legacy.pop("filter_range")
         self.assertEqual(ColorMap.from_dict(legacy).value_scale, "linear")
+        self.assertIsNone(ColorMap.from_dict(legacy).filter_range)
         with self.assertRaisesRegex(ValueError, "положительными"):
             replace(palette, minimum=0).validate()
         with self.assertRaisesRegex(ValueError, "Неизвестная шкала"):
             replace(palette, value_scale="sqrt").validate()
+
+    def test_filter_dialog_validation_and_project_roundtrip(self):
+        cloud = PointCloud(dataframe=pd.DataFrame({
+            "x": [0, 1, 2, 3], "y": [0] * 4, "z": [0] * 4,
+            "grade": [1, 2, 3, 4],
+        }))
+        cloud.set_mapping("x", "y", "z", ["grade"])
+        dialog = PaletteDialog(cloud)
+        dialog.field_combo.setCurrentIndex(dialog.field_combo.findData("grade"))
+        dialog.filter_check.setChecked(True)
+        dialog.filter_minimum_spin.setValue(2)
+        dialog.filter_maximum_spin.setValue(3)
+        dialog.minimum_spin.setValue(0)
+        dialog.maximum_spin.setValue(5)
+        self.assertEqual(dialog.palette.filter_range, (2, 3))
+        dialog._accept()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertEqual(ColorMap.from_dict(dialog.palette.to_dict()), dialog.palette)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Project.create(Path(directory) / "project")
+            project.add(cloud)
+            project.set_appearance(cloud, color_map=dialog.palette)
+            project.save()
+            loaded = Project.open(project.project_file).pointclouds()[0]
+            self.assertEqual(loaded.appearance.color_map.filter_range, (2, 3))
+        for bounds in ((3, 2), (float("nan"), 3), (True, 3)):
+            with self.subTest(bounds=bounds), self.assertRaises(ValueError):
+                replace(dialog.palette, filter_range=bounds).validate()
+        with self.assertRaisesRegex(ValueError, "положительным"):
+            replace(dialog.palette, value_scale="log", filter_range=(0, 3)).validate()
+
+    def test_filter_selects_points_without_changing_color_limits(self):
+        cloud = PointCloud(dataframe=pd.DataFrame({
+            "x": [0, 1, 2, 3], "y": [0] * 4, "z": [0] * 4,
+            "grade": [1, 2, 3, 4],
+        }))
+        cloud.set_mapping("x", "y", "z", ["grade"])
+        cloud.appearance = cloud.appearance.updated(
+            cloud.TYPE, color_map=replace(ColorMap.default("grade", 0, 5),
+                                          filter_range=(2, 3)))
+        mesh = filtered_palette_mesh(pv.PolyData(cloud.coordinates), cloud)
+        self.assertEqual(mesh.n_points, 2)
+        np.testing.assert_array_equal(mesh.point_data[PALETTE_SCALARS], [2, 3])
+        self.assertEqual((cloud.appearance.color_map.minimum,
+                          cloud.appearance.color_map.maximum), (0, 5))
+
+    def test_surface_filter_clips_faces_at_interval_boundaries(self):
+        surface = Surface()
+        surface.vertices = np.array([[0., 0., 0.], [1., 0., 1.], [0., 1., 2.]])
+        surface.faces = np.array([3, 0, 1, 2])
+        surface.appearance = surface.appearance.updated(
+            surface.TYPE, color_map=replace(ColorMap.default("z", 0, 2),
+                                            filter_range=(0.5, 1.5)))
+        mesh = filtered_palette_mesh(pv.PolyData(surface.vertices, surface.faces), surface)
+        values = mesh.point_data[PALETTE_SCALARS]
+        self.assertGreater(mesh.n_cells, 0)
+        self.assertAlmostEqual(values.min(), 0.5)
+        self.assertAlmostEqual(values.max(), 1.5)
 
     def test_dialog_log_scale_uses_positive_range_and_geometric_values(self):
         cloud = PointCloud(dataframe=pd.DataFrame({

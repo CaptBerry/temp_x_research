@@ -25,11 +25,11 @@ def _edges(centres, singleton_size):
                  centres[-1] + (centres[-1] - centres[-2]) / 2]
 
 
-def _uniform_dimensions(points, requested):
+def _uniform_dimensions(points, requested, max_cells=MAX_GRID_CELLS):
     dimensions = list(requested)
     spans = np.ptp(points, axis=0)
     remaining = [axis for axis in range(3) if dimensions[axis] == 0 and spans[axis] > 0]
-    target = min(MAX_GRID_CELLS, max(1, 2 * len(points)))
+    target = min(max_cells, max(1, 2 * len(points)))
     fixed = int(np.prod([value for value in dimensions if value > 0]))
     if remaining:
         scale = (max(1, target / fixed) / np.prod(spans[remaining])) ** (1 / len(remaining))

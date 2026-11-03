@@ -33,7 +33,8 @@ class LayeredCube(Folder):
 
     def get_layer(self, index):
         return next((layer for layer in self.layers
-                     if str(layer.metadata.get("layer_index")) == str(index)), None)
+                     if str(layer.metadata.get("layer_index")) == str(index)
+                     or str(layer.metadata.get("layer_name")) == str(index)), None)
 
     def validate(self):
         self.appearance.validate(self.TYPE)

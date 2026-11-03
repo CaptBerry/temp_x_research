@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QDialog, QFileDialog, QPushButton, QLineEdit, QTable
 import pandas as pd
 
 from importers.CsvImporter import CsvImporter
+from importers.DatLayerImporter import load_layer_intervals
 
 from PyQt6.QtWidgets import QHeaderView, QListWidgetItem
 
@@ -176,6 +177,8 @@ class ImportDialog(QDialog):
         self.layer_hint.hide()
         self._mesh_preview = False
         self._corner_preview_cube = None
+        self._layer_dat_preview = False
+        self._auto_layer_dat_source = None
         self.buttonImport.setEnabled(False)
         self.tabWidget.setTabText(0, "Данные")
         self.tabWidget.removeTab(1)
@@ -251,6 +254,7 @@ class ImportDialog(QDialog):
 
         self.buttonImport.setEnabled(False)
         self._corner_preview_cube = None
+        self._layer_dat_preview = False
         corner_file = Path(filename).suffix.lower() == ".grdecl"
         self._sync_cube_controls()
         for widget in (self.comboBox_Delimetr, self.checkBox_Header, self.comboBoxMapX,
@@ -274,6 +278,19 @@ class ImportDialog(QDialog):
                     delimiter=self.current_delimiter(),
                     header=self.checkBox_Header.isChecked()
                 )
+                self._layer_dat_preview = (Path(filename).suffix.lower() == ".dat"
+                                           and {"PKX", "PKY", "layer_id", "layer_AbsRoof",
+                                                "layer_AbsBase"}.issubset(df.columns)
+                                           and self.checkBox_Header.isChecked())
+                if self._layer_dat_preview and self._auto_layer_dat_source != filename:
+                    self._auto_layer_dat_source = filename
+                    self.comboBoxObjectType.blockSignals(True)
+                    self.comboBoxObjectType.setCurrentIndex(
+                        self.comboBoxObjectType.findData("cube"))
+                    self.comboBoxObjectType.blockSignals(False)
+                    self.comboBoxCubeGeometry.setCurrentIndex(
+                        self.comboBoxCubeGeometry.findData("layered"))
+                    self._sync_cube_controls()
         except Exception as error:
             self.tableModel.clear()
             for combo in (self.comboBoxMapX, self.comboBoxMapY, self.comboBoxMapZ):
@@ -312,11 +329,11 @@ class ImportDialog(QDialog):
         for combo in (self.comboBoxLayer, self.comboBoxRoof, self.comboBoxBase):
             combo.clear()
             combo.addItems(columns)
-        for combo, preferred in ((self.comboBoxLayer, ("layer", "слой", "номер_слоя")),
-                                 (self.comboBoxRoof, ("absroof", "roof", "кровля")),
-                                 (self.comboBoxBase, ("absbase", "base", "подошва"))):
-            match = next((i for i, name in enumerate(columns)
-                          if str(name).casefold() in preferred), None)
+        for combo, preferred in ((self.comboBoxLayer, ("layer_id", "layer", "слой", "номер_слоя")),
+                                 (self.comboBoxRoof, ("layer_absroof", "absroof", "roof", "кровля")),
+                                 (self.comboBoxBase, ("layer_absbase", "absbase", "base", "подошва"))):
+            match = next((i for wanted in preferred for i, name in enumerate(columns)
+                          if str(name).casefold() == wanted), None)
             combo.setCurrentIndex(match if match is not None else -1)
         for preferred in ("well_id", "wellid", "well", "id", "скважина", "номер_скважины"):
             match = next((i for i, name in enumerate(columns) if name.lower() == preferred), None)
@@ -339,6 +356,9 @@ class ImportDialog(QDialog):
 
             elif lname == "z":
                 self.comboBoxMapZ.setCurrentIndex(i)
+        if self._layer_dat_preview:
+            self.comboBoxMapX.setCurrentIndex(columns.index("PKX"))
+            self.comboBoxMapY.setCurrentIndex(columns.index("PKY"))
 
         self.listWidgetParametrs.clear()
 
@@ -356,7 +376,12 @@ class ImportDialog(QDialog):
 
             is_cube_index = self.object_type == "cube" and column.upper() in ("I", "J", "K")
             numeric_preview = pd.to_numeric(df[column], errors="coerce").notna().any()
-            item.setCheckState(Qt.CheckState.Unchecked if is_cube_index or
+            dat_parameter = (column.startswith("layer_") and
+                             column not in ("layer_id", "layer_number", "layer_abs_h",
+                                            "layer_AbsRoof", "layer_AbsBase"))
+            item.setCheckState(Qt.CheckState.Checked if self._layer_dat_preview and
+                               dat_parameter and numeric_preview else
+                               Qt.CheckState.Unchecked if self._layer_dat_preview or is_cube_index or
                                (self.object_type == "cube" and not numeric_preview)
                                else Qt.CheckState.Checked)
 
@@ -424,11 +449,18 @@ class ImportDialog(QDialog):
                 self.dataframe = None
                 self.import_object = build_mesh_surface(filename, self.comboBoxSurfaceKind.currentData())
             else:
-                self.dataframe = self.importer.load(
-                    filename,
-                    delimiter=self.current_delimiter(),
-                    header=self.checkBox_Header.isChecked()
-                )
+                if (self._layer_dat_preview and self.object_type == "cube" and
+                        self.comboBoxCubeGeometry.currentData() == "layered"):
+                    self.dataframe = load_layer_intervals(
+                        filename, self.coordinate_columns,
+                        self.comboBoxLayer.currentText(), self.comboBoxRoof.currentText(),
+                        self.comboBoxBase.currentText(), self.parameter_columns)
+                else:
+                    self.dataframe = self.importer.load(
+                        filename,
+                        delimiter=self.current_delimiter(),
+                        header=self.checkBox_Header.isChecked()
+                    )
                 if self.dataframe.empty:
                     raise ValueError("Файл не содержит строк данных.")
                 self.import_object = build_table_object(

@@ -34,6 +34,10 @@ class Project:
         self.created = datetime.now(timezone.utc).isoformat()
         self.last_saved = None
         self.axis_scale = (1.0, 1.0, 1.0)
+        self.axes_visible = True
+        self.axes_grid_visible = False
+        self.axes_label_decimals = 2
+        self.axes_round_grid = False
         self._migrated_axis_scale = False
 
     @classmethod
@@ -129,8 +133,14 @@ class Project:
 
     def _serialize(self):
         self._validate_axis_scale(self.axis_scale)
+        self._validate_axes_display(self.axes_visible, self.axes_grid_visible)
+        self._validate_axes_format(self.axes_label_decimals, self.axes_round_grid)
         return dict(version=self.VERSION, name=self.name, created=self.created,
                     last_saved=self.last_saved, axis_scale=list(self.axis_scale),
+                    axes_visible=self.axes_visible,
+                    axes_grid_visible=self.axes_grid_visible,
+                    axes_label_decimals=self.axes_label_decimals,
+                    axes_round_grid=self.axes_round_grid,
                     tree=self.root.to_dict())
 
     @staticmethod
@@ -149,7 +159,45 @@ class Project:
         self.mark_modified()
         return True
 
+    @staticmethod
+    def _validate_axes_display(visible, grid_visible):
+        if type(visible) is not bool or type(grid_visible) is not bool:
+            raise ValueError("Видимость осей и координатной сетки должна быть включена или выключена.")
+        return visible, grid_visible
+
+    @staticmethod
+    def _validate_axes_format(decimals, round_grid):
+        if type(decimals) is not int or not 0 <= decimals <= 9:
+            raise ValueError("Число знаков после запятой должно быть от 0 до 9.")
+        if type(round_grid) is not bool:
+            raise ValueError("Округление сетки должно быть включено или выключено.")
+        return decimals, round_grid
+
+    def set_axes_settings(self, scale, visible, grid_visible, *,
+                          label_decimals=None, round_grid=None):
+        candidate_scale = self._validate_axis_scale(scale)
+        candidate_visible, candidate_grid = self._validate_axes_display(visible, grid_visible)
+        candidate_decimals, candidate_round = self._validate_axes_format(
+            self.axes_label_decimals if label_decimals is None else label_decimals,
+            self.axes_round_grid if round_grid is None else round_grid)
+        if ((candidate_scale, candidate_visible, candidate_grid,
+             candidate_decimals, candidate_round) ==
+                (self.axis_scale, self.axes_visible, self.axes_grid_visible,
+                 self.axes_label_decimals, self.axes_round_grid)):
+            return False
+        self.axis_scale = candidate_scale
+        self.axes_visible = candidate_visible
+        self.axes_grid_visible = candidate_grid
+        self.axes_label_decimals = candidate_decimals
+        self.axes_round_grid = candidate_round
+        self.mark_modified()
+        return True
+
     def _deserialize(self, data):
+        self.axes_visible, self.axes_grid_visible = self._validate_axes_display(
+            data.get("axes_visible", True), data.get("axes_grid_visible", False))
+        self.axes_label_decimals, self.axes_round_grid = self._validate_axes_format(
+            data.get("axes_label_decimals", 2), data.get("axes_round_grid", False))
         if "axis_scale" in data:
             self.axis_scale = self._validate_axis_scale(data["axis_scale"])
         else:

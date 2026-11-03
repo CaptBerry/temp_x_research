@@ -145,6 +145,31 @@ def main():
             assert surface_actor.mapper.dataset is surface_mesh
             np.testing.assert_array_equal(plotter.camera_position, camera_before_scale)
             assert window.viewer.scene_bounds == tuple(surface_actor.bounds)
+            axes_actor = window.viewer.bounds_axes_actor
+            assert axes_actor is not None
+            np.testing.assert_allclose(axes_actor.GetBounds(), window.viewer.scene_bounds)
+            np.testing.assert_allclose(axes_actor.GetXAxisRange(),
+                                       (window.viewer.scene_bounds[0] / 2,
+                                        window.viewer.scene_bounds[1] / 2))
+            window.viewer.set_axes_format(0, True)
+            x_labels = window.viewer.bounds_axes_actor.GetAxisLabels(0)
+            assert [x_labels.GetValue(i) for i in range(x_labels.GetNumberOfValues())] == [
+                "-1", "0", "1"]
+            window.viewer.set_axes_format(2, False)
+            window.viewer.set_axes_display(True, True)
+            assert window.viewer.bounds_axes_actor.GetDrawXGridlines()
+            window.viewer.set_axes_display(False, True)
+            assert window.viewer.bounds_axes_actor is None
+            window.viewer.set_axes_display(True, False)
+            camera_before_label_check = plotter.camera_position
+            labels_before_label_check = window.viewer._axis_visible_labels[0]
+            plotter.view_yz()
+            plotter.render()
+            assert sum(bool(label) for label in window.viewer._axis_visible_labels[0]) < sum(
+                bool(label) for label in labels_before_label_check)
+            plotter.camera_position = camera_before_label_check
+            plotter.render()
+            assert any(window.viewer._axis_visible_labels[0])
             project.set_visible(cloud, True)
             window.update_3d_viewer()
             assert window.viewer.actors[cloud.uuid].scale == (2, 0.5, 3)

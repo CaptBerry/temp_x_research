@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -41,7 +42,7 @@ class ContainerAppearanceTests(unittest.TestCase):
             project = Project.create(directory / "project")
             collection = project.import_file(build_table_object(
                 "wellfile", wells_table(), source, ("x", "y", "z"), ("grade",), "id"))
-            palette = ColorMap.default("grade", 1, 4)
+            palette = replace(ColorMap.default("grade", 1, 4), filter_range=(2, 3))
             project.set_appearance(collection, color_map=palette, color="#334455",
                                    mode="points", point_size=9, opacity=0.6,
                                    label_visible=False, label_color="#123456",

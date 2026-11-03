@@ -31,6 +31,10 @@ class FakeViewer(QWidget):
         self.closed = False
         self.appearances = {}
         self.axis_scale = (1, 1, 1)
+        self.axes_visible = True
+        self.axes_grid_visible = False
+        self.axes_label_decimals = 2
+        self.axes_round_grid = False
         self.background = None
 
     def clear_scene(self):
@@ -48,6 +52,17 @@ class FakeViewer(QWidget):
 
     def set_axis_scale(self, scale):
         self.axis_scale = tuple(scale)
+
+    def set_axes_display(self, visible, grid_visible):
+        self.axes_visible = visible
+        self.axes_grid_visible = grid_visible
+
+    def set_axes_format(self, decimals, round_grid):
+        self.axes_label_decimals = decimals
+        self.axes_round_grid = round_grid
+
+    def update_coordinate_axes(self):
+        pass
 
     def set_theme(self, background):
         self.background = background
@@ -415,26 +430,47 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(editor.width_spin.isEnabled())
         self.assertFalse(editor.outline_color_button.isEnabled())
 
-    def test_axis_scale_is_available_without_object_selection(self):
+    def test_axis_settings_dialog_works_without_object_selection(self):
         project = self.attach_project()
         cloud = self.add_cloud(project)
         other = self.add_cloud(project)
         project.save()
         self.window.select_object(project.root.uuid)
         self.assertFalse(self.window.appearance_editor.fields.isEnabled())
-        axes = self.window.axis_scale_editor
-        self.assertTrue(axes.isEnabled())
-        axes.spins["x"].setValue(2)
-        axes.spins["y"].setValue(0.5)
-        axes.spins["z"].setValue(4)
+        self.assertTrue(self.window.axis_settings_button.isEnabled())
+        self.assertIn(self.window.action_axes, self.window.menuView.actions())
+
+        def choose_axes(dialog):
+            dialog.spins["x"].setValue(2)
+            dialog.spins["y"].setValue(0.5)
+            dialog.spins["z"].setValue(4)
+            dialog.grid_check.setChecked(True)
+            dialog.decimals_spin.setValue(0)
+            dialog.round_grid_check.setChecked(True)
+            return QDialog.DialogCode.Accepted
+
+        with patch("gui.MainWindow.AxisSettingsDialog.exec", new=choose_axes):
+            self.window.axis_settings_button.click()
         self.assertEqual(project.axis_scale, (2, 0.5, 4))
         self.assertEqual(self.window.viewer.axis_scale, (2, 0.5, 4))
+        self.assertTrue(project.axes_visible)
+        self.assertTrue(project.axes_grid_visible)
+        self.assertTrue(self.window.viewer.axes_grid_visible)
+        self.assertEqual(project.axes_label_decimals, 0)
+        self.assertTrue(project.axes_round_grid)
+        self.assertEqual(self.window.viewer.axes_label_decimals, 0)
+        self.assertTrue(self.window.viewer.axes_round_grid)
         self.assertFalse(hasattr(cloud.appearance, "scale_x"))
         self.assertEqual(other.appearance, Appearance())
         self.window.save_project()
-        self.assertEqual(Project.open(project.project_file).axis_scale, (2, 0.5, 4))
-        axes.reset_button.click()
-        self.assertEqual(project.axis_scale, (1, 1, 1))
+        restored = Project.open(project.project_file)
+        self.assertEqual(restored.axis_scale, (2, 0.5, 4))
+        self.assertTrue(restored.axes_grid_visible)
+        self.assertEqual(restored.axes_label_decimals, 0)
+        self.assertTrue(restored.axes_round_grid)
+        with patch("gui.MainWindow.AxisSettingsDialog.exec", return_value=QDialog.DialogCode.Rejected):
+            self.window.action_axes.trigger()
+        self.assertEqual(project.axis_scale, (2, 0.5, 4))
 
     def test_cancel_color_dialog_does_not_dirty_project(self):
         project = self.attach_project()
