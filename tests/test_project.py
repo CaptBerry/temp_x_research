@@ -13,7 +13,7 @@ from models.PointCloud import PointCloud
 from models.Surface import Surface
 from models.project.Folder import Folder
 from models.project.Project import Project
-from models.project.ProjectStorage import ProjectStorage
+from models.project.ProjectStorage import ProjectFormatError, ProjectStorage
 from models.project.TableStorage import TableStorage
 
 
@@ -155,10 +155,73 @@ class ProjectTests(unittest.TestCase):
         pd.testing.assert_frame_equal(reopened.pointclouds()[0].dataframe, cloud.dataframe)
         self.assertTrue(Path(reopened.pointclouds()[0].file_path).is_file())
 
+    def test_source_keeps_original_name_and_bytes_even_with_name_collision(self):
+        first = self.cloud("First")
+        first_bytes = Path(first.file_path).read_bytes()
+        self.project.import_file(first)
+        other_directory = self.directory / "other"
+        other_directory.mkdir()
+        second_path = other_directory / "points.csv"
+        second_path.write_text("x;y;z\n7;8;9\n", encoding="utf-8")
+        second = PointCloud("Second", second_path, CsvImporter().load(second_path))
+        second.set_mapping("x", "y", "z")
+        self.project.import_file(second)
+
+        self.project.save()
+        manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
+        paths = [node["file_path"] for node in manifest["tree"]["children"]]
+        self.assertEqual([Path(path).name for path in paths], ["points.csv", "points.csv"])
+        self.assertNotEqual(paths[0], paths[1])
+        self.assertEqual((self.project.project_path / paths[0]).read_bytes(), first_bytes)
+        self.assertEqual((self.project.project_path / paths[1]).read_bytes(), second_path.read_bytes())
+
+        self.project.save_as(self.directory / "copy")
+        copied = Project.open(self.directory / "copy")
+        self.assertEqual([Path(obj.file_path).name for obj in copied.pointclouds()],
+                         ["points.csv", "points.csv"])
+        self.assertEqual([Path(obj.file_path).read_bytes() for obj in copied.pointclouds()],
+                         [first_bytes, second_path.read_bytes()])
+
+    def test_delete_cleans_unreferenced_work_and_source_after_save(self):
+        first = self.project.import_file(self.cloud("First"))
+        second = PointCloud("Second", dataframe=first.dataframe.copy())
+        second.set_mapping("x", "y", "z", ["label"])
+        self.project.import_file(second)
+        self.project.save()
+        work_files = list(self.project.work_path.iterdir())
+        self.assertEqual(len(work_files), 1)
+        source_files = list(self.project.source_path.rglob("points.csv"))
+        self.assertEqual(len(source_files), 1)
+
+        self.project.remove(first)
+        self.assertEqual(list(self.project.work_path.iterdir()), work_files)
+        self.project.save()
+        self.assertEqual(list(self.project.work_path.iterdir()), work_files)
+        self.assertEqual(list(self.project.source_path.rglob("points.csv")), [])
+        self.project.remove(second)
+        self.project.save()
+        self.assertEqual(list(self.project.work_path.iterdir()), [])
+        self.assertEqual(list(self.project.source_path.iterdir()), [])
+        self.assertEqual(Project.open(self.project.project_file).pointclouds(), [])
+
+    def test_resaving_changed_data_removes_old_work_file(self):
+        cloud = self.project.import_file(self.cloud())
+        self.project.save()
+        old = next(self.project.work_path.iterdir())
+        cloud.dataframe.loc[0, "x"] = 42.0
+        self.project.mark_modified()
+        self.project.save()
+        current = list(self.project.work_path.iterdir())
+        self.assertEqual(len(current), 1)
+        self.assertNotEqual(current[0], old)
+        self.assertFalse(old.exists())
+        self.assertEqual(Project.open(self.project.project_file).pointclouds()[0].dataframe.loc[0, "x"], 42.0)
+
     def test_failed_commit_keeps_old_manifest_and_dirty_state(self):
         cloud = self.project.import_file(self.cloud())
         self.project.save()
         before = self.project.project_file.read_bytes()
+        old_work = next(self.project.work_path.iterdir())
         saved_at = self.project.last_saved
         cloud.dataframe.loc[0, "x"] = 42.0
         self.project.mark_modified()
@@ -166,6 +229,7 @@ class ProjectTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.project.save()
         self.assertEqual(self.project.project_file.read_bytes(), before)
+        self.assertTrue(old_work.is_file())
         self.assertEqual(self.project.last_saved, saved_at)
         self.assertTrue(self.project.modified)
         self.assertEqual(Project.open(self.project.project_file).pointclouds()[0].dataframe.loc[0, "x"], 1.25)
@@ -279,6 +343,39 @@ class ProjectTests(unittest.TestCase):
             self.project.project_file.write_text(json.dumps(data), encoding="utf-8")
             with self.subTest(version=version, asset=asset), self.assertRaises((ValueError, OSError)):
                 Project.open(self.project.project_file)
+
+    def test_deleted_work_file_reports_object_and_can_be_restored(self):
+        cloud = self.project.import_file(self.cloud())
+        self.project.save()
+        original_manifest = self.project.project_file.read_bytes()
+        manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
+        relative = manifest["tree"]["children"][0]["data_file"]
+        data_file = self.project.project_path / relative
+        contents = data_file.read_bytes()
+        data_file.unlink()
+
+        with self.assertRaises(ProjectFormatError) as caught:
+            Project.open(self.project.project_file)
+        self.assertIn(cloud.name, str(caught.exception))
+        self.assertIn(relative, str(caught.exception))
+        self.assertIn("Восстановите", str(caught.exception))
+        self.assertEqual(self.project.project_file.read_bytes(), original_manifest)
+
+        data_file.write_bytes(contents)
+        reopened = Project.open(self.project.project_file)
+        pd.testing.assert_frame_equal(reopened.pointclouds()[0].dataframe, cloud.dataframe)
+
+    def test_deleted_packaged_source_does_not_break_saved_data(self):
+        cloud = self.project.import_file(self.cloud())
+        self.project.save()
+        manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
+        relative = manifest["tree"]["children"][0]["file_path"]
+        (self.project.project_path / relative).unlink()
+
+        reopened = Project.open(self.project.project_file)
+        pd.testing.assert_frame_equal(reopened.pointclouds()[0].dataframe, cloud.dataframe)
+        reopened.save()
+        self.assertFalse(Project.open(reopened.project_file).modified)
 
     def test_invalid_surface_does_not_replace_saved_project(self):
         before = self.project.project_file.read_bytes()

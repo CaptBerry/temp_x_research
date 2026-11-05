@@ -1,14 +1,16 @@
 """Disk format: immutable assets and an atomically replaced manifest.
 
-Unreferenced assets are retained so a failed save never damages the last one.
+Obsolete assets are removed only after the new manifest has been committed.
 Only JSON and NumPy arrays without pickle are read from project files.
 """
 
 import hashlib
 import io
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import tempfile
 
 import numpy as np
@@ -23,12 +25,17 @@ from models.WellFile import WellFile
 from models.project.TableStorage import TableStorage
 
 
+logger = logging.getLogger(__name__)
+
+
 class ProjectFormatError(ValueError):
     pass
 
 
 class ProjectStorage:
     VERSION = 3
+    _HASH = re.compile(r"[0-9a-f]{64}\Z")
+    _WORK_SUFFIXES = (".table.npz", ".surface.npz", ".corner.npz")
 
     @staticmethod
     def read_manifest(path):
@@ -78,6 +85,50 @@ class ProjectStorage:
         return relative.as_posix()
 
     @classmethod
+    def _store_source(cls, directory, source, name):
+        content = source.read_bytes()
+        identifier = hashlib.sha256(name.encode("utf-8") + b"\0" + content).hexdigest()
+        relative = Path("source") / identifier / name
+        target = directory / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != content:
+            cls._write_atomic(target, content)
+        return relative.as_posix()
+
+    @classmethod
+    def _prune_assets(cls, directory, manifest):
+        work_refs = set()
+        source_refs = set()
+
+        def collect(node):
+            if node.get("data_file"):
+                work_refs.add(node["data_file"])
+            if node.get("file_path"):
+                source_refs.add(node["file_path"])
+            for child in node.get("children", []):
+                collect(child)
+
+        collect(manifest["tree"])
+        work = directory / "work"
+        for path in work.iterdir():
+            if (path.is_file() and any(path.name.endswith(suffix) for suffix in cls._WORK_SUFFIXES)
+                    and cls._HASH.fullmatch(path.name.split(".", 1)[0])
+                    and path.relative_to(directory).as_posix() not in work_refs):
+                path.unlink()
+
+        source = directory / "source"
+        for path in source.iterdir():
+            if path.is_dir() and not path.is_symlink() and cls._HASH.fullmatch(path.name):
+                for file in path.iterdir():
+                    if file.is_file() and file.relative_to(directory).as_posix() not in source_refs:
+                        file.unlink()
+                if not any(path.iterdir()):
+                    path.rmdir()
+            elif (path.is_file() and cls._HASH.fullmatch(path.stem)
+                  and path.relative_to(directory).as_posix() not in source_refs):
+                path.unlink()
+
+    @classmethod
     def save(cls, project, directory, saved_at):
         directory = Path(directory).resolve()
         for name in ("source", "work", "cache"):
@@ -119,9 +170,11 @@ class ProjectStorage:
                 source = Path(obj.file_path) if obj.file_path else None
                 node["file_path"] = None
                 if source is not None and source.is_file():
-                    node["file_path"] = cls._store_asset(
-                        directory, "source", source.suffix.lower(), source.read_bytes()
-                    )
+                    name = obj.metadata.get("source_name", source.name)
+                    if (not isinstance(name, str) or not name or name in (".", "..")
+                            or Path(name).name != name or Path(name).is_reserved()):
+                        name = source.name
+                    node["file_path"] = cls._store_source(directory, source, name)
                 source_paths[obj.uuid] = node["file_path"]
             for child in node.get("children", []):
                 store_node(child)
@@ -129,6 +182,10 @@ class ProjectStorage:
         store_node(manifest["tree"])
         content = json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         cls._write_atomic(directory / "project.json", content)
+        try:
+            cls._prune_assets(directory, manifest)
+        except OSError:
+            logger.warning("Не удалось удалить устаревшие файлы проекта: %s", directory, exc_info=True)
         return source_paths
 
     @classmethod
@@ -148,6 +205,11 @@ class ProjectStorage:
                     obj.file_path = str(source)
                 if not legacy:
                     path = cls.asset_path(project.project_path, node.get("data_file"))
+                    if not path.is_file():
+                        raise ProjectFormatError(
+                            f"Отсутствует файл данных объекта «{obj.name}»: "
+                            f"{node['data_file']}. Восстановите его из копии проекта."
+                        )
                     if isinstance(obj, DataCube) and obj.is_corner_point:
                         names = node.get("grid_property_names")
                         dimensions = node.get("grid_dimensions")

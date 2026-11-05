@@ -239,11 +239,15 @@ class WindowTests(unittest.TestCase):
     def test_delete_changes_domain_and_clears_view(self):
         project = self.attach_project()
         cloud = self.add_cloud(project)
+        self.window.save_project()
+        self.assertEqual(len(list(project.work_path.iterdir())), 1)
         with patch("gui.MainWindow.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
             self.window.delete_object(cloud)
         self.assertEqual(project.pointclouds(), [])
         self.assertEqual(self.window.viewer.actors, {})
+        self.assertEqual(len(list(project.work_path.iterdir())), 1)
         self.window.save_project()
+        self.assertEqual(list(project.work_path.iterdir()), [])
         self.assertEqual(Project.open(project.project_file).pointclouds(), [])
 
     def test_cancel_close_leaves_window_and_project_open(self):
@@ -314,6 +318,25 @@ class WindowTests(unittest.TestCase):
             self.assertTrue(self.window.open_project())
         self.assertIn(cloud.uuid, self.window.viewer.actors)
         self.assertEqual(len(self.window.project.pointclouds()), 1)
+
+    def test_open_project_with_deleted_data_keeps_current_scene(self):
+        current = self.attach_project()
+        cloud = self.add_cloud(current)
+        broken = Project.create(self.directory / "broken")
+        missing = PointCloud("Missing", dataframe=pd.DataFrame({
+            "x": [1.], "y": [2.], "z": [3.]}))
+        missing.set_mapping("x", "y", "z")
+        broken.import_file(missing)
+        broken.save()
+        next(broken.work_path.glob("*.table.npz")).unlink()
+
+        with patch("gui.MainWindow.QFileDialog.getOpenFileName",
+                   return_value=(str(broken.project_file), "")), \
+                patch.object(self.window, "_report_error") as report:
+            self.assertFalse(self.window.open_project())
+        self.assertIs(self.window.project, current)
+        self.assertIn(cloud.uuid, self.window.viewer.actors)
+        self.assertIn("Missing", str(report.call_args.args[1]))
 
     def test_new_project_cancel_keeps_previous_scene(self):
         project = self.attach_project()
