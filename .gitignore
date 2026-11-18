@@ -16,3 +16,4 @@ dist/
 
 # PyInstaller
 *.spec
+!XSearch.spec

@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import QTreeView, QMenu, QAbstractItemView
 from models.project.Folder import Folder
 from models.WellFile import WellFile
 from models.LayeredCube import LayeredCube
+from models.eda import supports_eda
 
 
 class ProjectTreeView(QTreeView):
@@ -37,12 +38,17 @@ class ProjectTreeView(QTreeView):
             menu.addAction("Добавить папку", lambda: window.add_work_subfolder())
             menu.addAction("Импортировать объект…", lambda: window.show_import_dialog())
             menu.addAction("Переименовать проект", lambda: window.rename_object())
+            if supports_eda(window.project.root):
+                menu.addAction("Разведочный анализ (EDA)…", lambda: window.open_eda(window.project.root))
             if window.project.project_path is not None:
                 menu.addAction("Открыть папку проекта", lambda: QDesktopServices.openUrl(
                     QUrl.fromLocalFile(str(window.project.project_path))))
             menu.addSeparator()
             menu.addAction("Закрыть проект", window.close_project)
         elif obj is not None:
+            if supports_eda(obj):
+                menu.addAction("Разведочный анализ (EDA)…", lambda: window.open_eda(obj))
+                menu.addSeparator()
             if isinstance(obj, Folder) and obj.children:
                 menu.addAction("Выбрать все", lambda: window.set_container_visibility(obj, True))
                 menu.addAction("Отменить выбор", lambda: window.set_container_visibility(obj, False))

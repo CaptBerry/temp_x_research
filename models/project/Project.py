@@ -38,6 +38,11 @@ class Project:
         self.axes_grid_visible = False
         self.axes_label_decimals = 2
         self.axes_round_grid = False
+        self.clip_enabled = False
+        self.clip_origin = (0.0, 0.0, 0.0)
+        self.clip_rotation = (0.0, 0.0, 0.0)
+        self.clip_invert = False
+        self.clip_initialized = False
         self._migrated_axis_scale = False
 
     @classmethod
@@ -132,6 +137,9 @@ class Project:
         self._save_to(path, new_destination=path != self.project_path)
 
     def _serialize(self):
+        from scene.clipping import validate_clipping
+        validate_clipping(self.clip_enabled, self.clip_origin,
+                          self.clip_rotation, self.clip_invert)
         self._validate_axis_scale(self.axis_scale)
         self._validate_axes_display(self.axes_visible, self.axes_grid_visible)
         self._validate_axes_format(self.axes_label_decimals, self.axes_round_grid)
@@ -141,7 +149,23 @@ class Project:
                     axes_grid_visible=self.axes_grid_visible,
                     axes_label_decimals=self.axes_label_decimals,
                     axes_round_grid=self.axes_round_grid,
+                    clipping=dict(enabled=self.clip_enabled,
+                                  origin=list(self.clip_origin),
+                                  rotation=list(self.clip_rotation),
+                                  invert=self.clip_invert,
+                                  initialized=self.clip_initialized),
                     tree=self.root.to_dict())
+
+    def set_clipping(self, enabled, origin, rotation, invert=False):
+        from scene.clipping import validate_clipping
+        candidate = validate_clipping(enabled, origin, rotation, invert)
+        if candidate == (self.clip_enabled, self.clip_origin,
+                         self.clip_rotation, self.clip_invert):
+            return False
+        self.clip_enabled, self.clip_origin, self.clip_rotation, self.clip_invert = candidate
+        self.clip_initialized = True
+        self.mark_modified()
+        return True
 
     @staticmethod
     def _validate_axis_scale(values):
@@ -194,6 +218,17 @@ class Project:
         return True
 
     def _deserialize(self, data):
+        from scene.clipping import validate_clipping
+        clipping = data.get("clipping", {})
+        if not isinstance(clipping, dict):
+            raise ProjectFormatError("Некорректные настройки отсечения.")
+        (self.clip_enabled, self.clip_origin, self.clip_rotation,
+         self.clip_invert) = validate_clipping(
+            clipping.get("enabled", False), clipping.get("origin", (0, 0, 0)),
+            clipping.get("rotation", (0, 0, 0)), clipping.get("invert", False))
+        self.clip_initialized = clipping.get("initialized", bool(clipping))
+        if type(self.clip_initialized) is not bool:
+            raise ProjectFormatError("Некорректные настройки отсечения.")
         self.axes_visible, self.axes_grid_visible = self._validate_axes_display(
             data.get("axes_visible", True), data.get("axes_grid_visible", False))
         self.axes_label_decimals, self.axes_round_grid = self._validate_axes_format(

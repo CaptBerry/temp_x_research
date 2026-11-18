@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, pyqtSignal
 from PyQt6.QtGui import QColor, QCloseEvent, QPalette
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget
 
@@ -24,6 +24,7 @@ from importers.ObjectFactory import build_table_object
 
 class FakeViewer(QWidget):
     """Use actual Qt widgets while isolating OpenGL in lifecycle tests."""
+    clippingMoved = pyqtSignal(tuple, tuple)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,6 +37,11 @@ class FakeViewer(QWidget):
         self.axes_label_decimals = 2
         self.axes_round_grid = False
         self.background = None
+        self.scene_bounds = None
+        self.clip_enabled = False
+        self.clip_origin = (0, 0, 0)
+        self.clip_rotation = (0, 0, 0)
+        self.clip_invert = False
 
     def clear_scene(self):
         self.actors.clear()
@@ -66,6 +72,12 @@ class FakeViewer(QWidget):
 
     def set_theme(self, background):
         self.background = background
+
+    def set_clipping_settings(self, enabled, origin, rotation, invert=False, *, sync_widget=True):
+        self.clip_enabled = enabled
+        self.clip_origin = tuple(origin)
+        self.clip_rotation = tuple(rotation)
+        self.clip_invert = invert
 
     def update_object_appearance(self, obj):
         self.appearances[obj.uuid] = obj.appearance

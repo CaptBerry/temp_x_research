@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from itertools import product
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from pyvistaqt import QtInteractor
 import logging
@@ -8,9 +9,11 @@ import logging
 import numpy as np
 import pyvista as pv
 from vtkmodules.vtkCommonCore import vtkStringArray
+from vtkmodules.vtkCommonDataModel import vtkPlane
 
 from scene.camera import SceneCamera
 from scene.axis_ticks import readable_axis_labels, rounded_axis_range
+from scene.clipping import plane_basis, rotation_for_normal, validate_clipping
 from models.PointCloud import PointCloud
 from models.DataCube import DataCube
 from models.Surface import Surface
@@ -25,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class Viewer3D(QWidget):
+    clippingMoved = pyqtSignal(tuple, tuple)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -33,6 +37,7 @@ class Viewer3D(QWidget):
         self.actors = {}
         self._source_meshes = {}
         self.well_label_actors = {}
+        self._well_label_anchor_indices = {}
         self._visible_wells = {}
 
         self.camera = SceneCamera()
@@ -46,6 +51,14 @@ class Viewer3D(QWidget):
         self.bounds_axes_actor = None
         self._axis_base_labels = ()
         self._axis_visible_labels = [None, None, None]
+        self.clip_enabled = False
+        self.clip_origin = (0.0, 0.0, 0.0)
+        self.clip_rotation = (0.0, 0.0, 0.0)
+        self.clip_invert = False
+        self._clip_plane = vtkPlane()
+        self._clip_visual = None
+        self._clip_mesh = None
+        self._clip_widget = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -101,16 +114,19 @@ class Viewer3D(QWidget):
         self.plotter.reset_camera()
 
     def clear_scene(self):
+        self._remove_clipping_visuals()
         self.plotter.clear()
         self.plotter.show_axes()
         self.actors.clear()
         self._source_meshes.clear()
         self.well_label_actors.clear()
+        self._well_label_anchor_indices.clear()
         self._visible_wells.clear()
         self.scene_bounds = None
         self.bounds_axes_actor = None
         self._axis_base_labels = ()
         self._axis_visible_labels = [None, None, None]
+        self.clip_enabled = False
 
     @contextmanager
     def scene_update(self):
@@ -146,6 +162,7 @@ class Viewer3D(QWidget):
             apply_appearance(actor, obj.appearance, self._point_viewport())
             apply_color_map(actor, obj)
             self._apply_axis_scale(actor)
+            self._attach_clipping(actor)
             self.actors[obj.uuid] = actor
             self._recompute_scene_bounds()
             return actor
@@ -159,6 +176,7 @@ class Viewer3D(QWidget):
         apply_appearance(actor, cube.appearance, self._point_viewport())
         apply_color_map(actor, cube)
         self._apply_axis_scale(actor)
+        self._attach_clipping(actor)
         self.actors[cube.uuid] = actor
         self._recompute_scene_bounds()
         return actor
@@ -186,6 +204,7 @@ class Viewer3D(QWidget):
         apply_appearance(actor, well.appearance, self._point_viewport())
         apply_color_map(actor, well)
         self._apply_axis_scale(actor)
+        self._attach_clipping(actor)
         self.actors[well.uuid] = actor
         self._sync_well_label(well)
         self._recompute_scene_bounds()
@@ -193,12 +212,25 @@ class Viewer3D(QWidget):
 
     def _sync_well_label(self, well):
         previous = self.well_label_actors.pop(well.uuid, None)
+        self._well_label_anchor_indices.pop(well.uuid, None)
         if previous is not None:
             self.plotter.remove_actor(previous, reset_camera=False, render=False)
         if well.uuid not in self.actors or not well.appearance.label_visible:
             return
-        first_visible = self.actors[well.uuid].mapper.dataset.points[0]
-        position = np.asarray(first_visible, dtype=float) * np.asarray(self.axis_scale)
+        points = np.asarray(self.actors[well.uuid].mapper.dataset.points, dtype=float)
+        if not len(points):
+            return
+        if self.clip_enabled:
+            world_points = points * self.axis_scale
+            origin = np.asarray(self._clip_plane.GetOrigin())
+            normal = np.asarray(self._clip_plane.GetNormal())
+            kept = np.flatnonzero((world_points - origin) @ normal >= 0)
+            if not len(kept):
+                return
+            anchor_index = int(kept[0])
+        else:
+            anchor_index = 0
+        position = points[anchor_index] * np.asarray(self.axis_scale)
         label = self.plotter.add_point_labels(
             np.asarray([position]), [well.well_id], name=f"well-{well.uuid}",
             text_color=well.appearance.label_color,
@@ -208,6 +240,23 @@ class Viewer3D(QWidget):
             reset_camera=False, render=False,
         )
         self.well_label_actors[well.uuid] = label
+        self._well_label_anchor_indices[well.uuid] = anchor_index
+
+    def _refresh_clipped_well_labels(self):
+        origin = np.asarray(self._clip_plane.GetOrigin())
+        normal = np.asarray(self._clip_plane.GetNormal())
+        for well in self._visible_wells.values():
+            actor = self.actors.get(well.uuid)
+            if actor is None or not well.appearance.label_visible:
+                continue
+            points = np.asarray(actor.mapper.dataset.points, dtype=float)
+            if self.clip_enabled:
+                kept = np.flatnonzero((points * self.axis_scale - origin) @ normal >= 0)
+                anchor_index = int(kept[0]) if len(kept) else None
+            else:
+                anchor_index = 0 if len(points) else None
+            if anchor_index != self._well_label_anchor_indices.get(well.uuid):
+                self._sync_well_label(well)
 
     def add_point_cloud(self, point_cloud):
         coordinates = point_cloud.coordinates
@@ -231,6 +280,7 @@ class Viewer3D(QWidget):
         apply_appearance(actor, point_cloud.appearance, self._point_viewport())
         apply_color_map(actor, point_cloud)
         self._apply_axis_scale(actor)
+        self._attach_clipping(actor)
         self.actors[point_cloud.uuid] = actor
         self._recompute_scene_bounds()
 
@@ -265,6 +315,7 @@ class Viewer3D(QWidget):
                 apply_appearance(actor, obj.appearance, viewport)
                 apply_color_map(actor, obj)
                 self._apply_axis_scale(actor)
+                self._attach_clipping(actor)
                 self.actors[obj.uuid] = actor
                 if isinstance(obj, Well):
                     self._sync_well_label(obj)
@@ -299,6 +350,95 @@ class Viewer3D(QWidget):
         self.scene_bounds = None
         for actor in self.actors.values():
             self.include_bounds(actor.bounds)
+        if self.clip_enabled:
+            self._sync_clipping_visuals()
+
+    def _attach_clipping(self, actor):
+        if self.clip_enabled:
+            actor.mapper.AddClippingPlane(self._clip_plane)
+
+    def _remove_clipping_visuals(self):
+        if self._clip_widget is not None:
+            self.plotter.clear_plane_widgets()
+            self._clip_widget = None
+        if self._clip_visual is not None:
+            self.plotter.remove_actor(self._clip_visual, reset_camera=False, render=False)
+            self._clip_visual = None
+            self._clip_mesh = None
+
+    def set_clipping_settings(self, enabled, origin, rotation, invert=False, *,
+                              sync_widget=True):
+        enabled, origin, rotation, invert = validate_clipping(enabled, origin, rotation, invert)
+        with self.scene_update():
+            self.clip_enabled = enabled
+            self.clip_origin = origin
+            self.clip_rotation = rotation
+            self.clip_invert = invert
+            if not enabled:
+                for actor in self.actors.values():
+                    actor.mapper.RemoveAllClippingPlanes()
+                self._remove_clipping_visuals()
+                self._refresh_clipped_well_labels()
+                return
+            world_origin = np.asarray(origin) * self.axis_scale
+            normal = plane_basis(rotation)[2]
+            self._clip_plane.SetOrigin(*world_origin)
+            self._clip_plane.SetNormal(*(normal * (-1 if invert else 1)))
+            self._clip_plane.Modified()
+            for actor in self.actors.values():
+                if actor.mapper.GetNumberOfClippingPlanes() == 0:
+                    self._attach_clipping(actor)
+                actor.mapper.Modified()
+            self._sync_clipping_visuals(sync_widget=sync_widget)
+            self._refresh_clipped_well_labels()
+
+    def _sync_clipping_visuals(self, *, sync_widget=True):
+        if not self.clip_enabled or self.scene_bounds is None:
+            return
+        bounds = np.asarray(self.scene_bounds, dtype=float)
+        spans = bounds[[1, 3, 5]] - bounds[[0, 2, 4]]
+        radius = max(float(np.linalg.norm(spans)) * 0.7, 1.0)
+        origin = np.asarray(self.clip_origin) * self.axis_scale
+        u, v, normal = plane_basis(self.clip_rotation)
+        points = np.asarray([origin - radius * u - radius * v,
+                             origin + radius * u - radius * v,
+                             origin + radius * u + radius * v,
+                             origin - radius * u + radius * v])
+        if self._clip_mesh is None:
+            self._clip_mesh = pv.PolyData(points, faces=[4, 0, 1, 2, 3])
+            self._clip_visual = self.plotter.add_mesh(
+                self._clip_mesh, name="__clipping_plane__", color="#38bdf8",
+                edge_color="#0ea5e9", show_edges=True, line_width=2,
+                opacity=0.16, lighting=False, pickable=False,
+                reset_camera=False, render=False, show_scalar_bar=False)
+        else:
+            self._clip_mesh.points = points
+            self._clip_mesh.Modified()
+        if self._clip_widget is None:
+            widget_bounds = bounds.copy()
+            for axis in range(3):
+                low, high = 2 * axis, 2 * axis + 1
+                if widget_bounds[high] - widget_bounds[low] < radius * 0.1:
+                    center = (widget_bounds[low] + widget_bounds[high]) / 2
+                    widget_bounds[low], widget_bounds[high] = center - radius * 0.05, center + radius * 0.05
+            self._clip_widget = self.plotter.add_plane_widget(
+                self._plane_widget_changed, normal=normal, origin=origin,
+                bounds=tuple(widget_bounds), color="#0ea5e9",
+                implicit=True, outline_translation=True,
+                interaction_event="always", test_callback=False)
+        elif sync_widget:
+            self._clip_widget.SetOrigin(origin)
+            self._clip_widget.SetNormal(normal)
+            self._clip_widget.Modified()
+            self._clip_widget.UpdatePlacement()
+
+    def _plane_widget_changed(self, normal, origin):
+        origin = tuple(float(value) for value in np.asarray(origin) / self.axis_scale)
+        rotation = rotation_for_normal(normal, self.clip_rotation[2])
+        if (np.allclose(origin, self.clip_origin, rtol=0, atol=1e-6)
+                and np.allclose(rotation, self.clip_rotation, rtol=0, atol=1e-6)):
+            return
+        self.clippingMoved.emit(origin, rotation)
 
     def _apply_axis_scale(self, actor):
         # One world-coordinate transform for every data actor. In particular,
@@ -315,6 +455,9 @@ class Viewer3D(QWidget):
                 axes.SetTotalLength(*(value / largest for value in self.axis_scale))
             for actor in self.actors.values():
                 self._apply_axis_scale(actor)
+            if self.clip_enabled:
+                self.set_clipping_settings(True, self.clip_origin,
+                                           self.clip_rotation, self.clip_invert)
             for well in self._visible_wells.values():
                 self._sync_well_label(well)
             self._recompute_scene_bounds()
@@ -468,6 +611,7 @@ class Viewer3D(QWidget):
         )
 
     def closeEvent(self, event):
+        self._remove_clipping_visuals()
         if self.plotter.render_window is not None:
             self.plotter.render_window.RemoveObserver(self._render_observer)
         self.plotter.close()

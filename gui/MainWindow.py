@@ -2,14 +2,16 @@ import logging
 from pathlib import Path
 
 from PyQt6 import uic
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, QSignalBlocker
 from PyQt6.QtGui import QAction, QKeySequence, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QFileDialog, QMessageBox, QInputDialog, QScrollArea, QFrame, QPushButton
 
 from gui.Viewer3D import Viewer3D
 from gui.dialogs.ImportDialog import ImportDialog
 from gui.dialogs.AxisSettingsDialog import AxisSettingsDialog
+from gui.dialogs.ClippingDialog import ClippingDialog
 from gui.dialogs.ThemeDialog import ThemeDialog
+from gui.dialogs.EDADialog import EDADialog
 from gui.theme import THEMES, apply_theme
 from gui.custom_widgets.projectTreeView import ProjectTreeView
 from gui.custom_widgets.AppearanceEditor import AppearanceEditor
@@ -32,6 +34,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         uic.loadUi(Path(__file__).with_name("MainWindow.ui"), self)
         self.project = None
+        self._eda_dialogs = {}
+        self._clip_dialog = None
         self.settings = settings if settings is not None else QSettings("AVPD", "XSearch")
         self.replace_tree_view()
         self.viewer = Viewer3D(self)
@@ -56,6 +60,7 @@ class MainWindow(QMainWindow):
         self.appearance_editor.appearanceChanged.connect(self._change_appearance)
         self.appearance_editor.paletteRequested.connect(self._open_palette)
         self._connect_actions()
+        self.viewer.clippingMoved.connect(self._clipping_moved)
         self.update_project_tree()
         self.update_window_state()
         if restore_session:
@@ -88,6 +93,14 @@ class MainWindow(QMainWindow):
         self.action_axes = QAction("Настройка осей…", self)
         self.action_axes.triggered.connect(self._open_axis_settings)
         self.menuView.addAction(self.action_axes)
+        self.menu_clip = self.menuView.addMenu("Отсечь объекты")
+        self.action_clip_enabled = QAction("Показать плоскость и отсечь", self)
+        self.action_clip_enabled.setCheckable(True)
+        self.action_clip_enabled.toggled.connect(self._toggle_clipping)
+        self.menu_clip.addAction(self.action_clip_enabled)
+        self.action_clip_settings = QAction("Настроить плоскость…", self)
+        self.action_clip_settings.triggered.connect(self._open_clipping_dialog)
+        self.menu_clip.addAction(self.action_clip_settings)
 
     def set_theme(self, theme, *, save=True):
         background = apply_theme(QApplication.instance(), theme)
@@ -102,6 +115,17 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.set_theme(dialog.selected_theme)
 
+    def open_eda(self, obj):
+        try:
+            dialog = EDADialog(obj, self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            key = id(dialog)
+            self._eda_dialogs[key] = dialog
+            dialog.destroyed.connect(lambda _=None, key=key: self._eda_dialogs.pop(key, None))
+            dialog.show()
+        except Exception as error:
+            self._report_error("Не удалось открыть EDA", error)
+
     def replace_tree_view(self):
         old_tree = self.projectTree
         self.projectTree = ProjectTreeView(self)
@@ -114,6 +138,9 @@ class MainWindow(QMainWindow):
                        self.action_close_project, self.actionImportXYZ,
                        self.action_axes, self.axis_settings_button):
             action.setEnabled(active)
+        self.menu_clip.setEnabled(active)
+        with QSignalBlocker(self.action_clip_enabled):
+            self.action_clip_enabled.setChecked(active and self.project.clip_enabled)
         name = self.project.name if active else "Нет проекта"
         self.setWindowTitle(f"{name}[*] — X Search")
         self.setWindowModified(active and self.project.has_unsaved_changes())
@@ -147,6 +174,9 @@ class MainWindow(QMainWindow):
             self._render_project(previous)
             raise
         self.project = project
+        if self._clip_dialog is not None:
+            self._clip_dialog.close()
+            self._clip_dialog = None
         self.update_project_tree()
         self.update_window_state()
         self._remember_project()
@@ -165,6 +195,90 @@ class MainWindow(QMainWindow):
                         self.viewer.add_object(obj)
                 self.viewer.update_coordinate_axes()
                 self.viewer.focus_on_scene()
+                self.viewer.set_clipping_settings(
+                    project.clip_enabled, project.clip_origin,
+                    project.clip_rotation, project.clip_invert)
+
+    def _clip_scene_center(self):
+        bounds = self.viewer.scene_bounds
+        if bounds is None:
+            return (0.0, 0.0, 0.0)
+        return tuple((bounds[2 * axis] + bounds[2 * axis + 1]) /
+                     (2 * self.project.axis_scale[axis]) for axis in range(3))
+
+    def _toggle_clipping(self, enabled):
+        if self.project is None:
+            return
+        project = self.project
+        previous = (project.clip_enabled, project.clip_origin, project.clip_rotation,
+                    project.clip_invert, project.clip_initialized, project.modified)
+        try:
+            origin = self._clip_scene_center() if enabled and not project.clip_initialized else project.clip_origin
+            project.set_clipping(enabled, origin, project.clip_rotation, project.clip_invert)
+            self.viewer.set_clipping_settings(enabled, project.clip_origin,
+                                              project.clip_rotation, project.clip_invert)
+            if enabled:
+                self._open_clipping_dialog()
+            elif self._clip_dialog is not None:
+                self._clip_dialog.close()
+        except Exception as error:
+            (project.clip_enabled, project.clip_origin, project.clip_rotation,
+             project.clip_invert, project.clip_initialized, project.modified) = previous
+            try:
+                self.viewer.set_clipping_settings(*previous[:4])
+            except Exception:
+                logger.exception("Не удалось восстановить отсечение")
+            with QSignalBlocker(self.action_clip_enabled):
+                self.action_clip_enabled.setChecked(project.clip_enabled)
+            self._report_error("Не удалось применить отсечение", error)
+        self.update_window_state()
+
+    def _open_clipping_dialog(self):
+        if self.project is None:
+            return
+        if not self.project.clip_enabled:
+            self.action_clip_enabled.setChecked(True)
+            return
+        if self._clip_dialog is None:
+            bounds = self.viewer.scene_bounds
+            spans = [(bounds[2 * i + 1] - bounds[2 * i]) for i in range(3)] if bounds else [1]
+            step = max(max(spans) / 20, 0.000001)
+            dialog = ClippingDialog(self.project, step, self)
+            dialog.settingsChanged.connect(self._apply_clipping_from_dialog)
+            dialog.finished.connect(lambda _result: setattr(self, "_clip_dialog", None))
+            self._clip_dialog = dialog
+        self._clip_dialog.show()
+        self._clip_dialog.raise_()
+        self._clip_dialog.activateWindow()
+
+    def _apply_clipping_from_dialog(self, origin, rotation, invert, *, from_widget=False):
+        if self.project is None:
+            return
+        previous = (self.project.clip_enabled, self.project.clip_origin,
+                    self.project.clip_rotation, self.project.clip_invert,
+                    self.project.clip_initialized, self.project.modified)
+        try:
+            if self.project.set_clipping(True, origin, rotation, invert):
+                self.viewer.set_clipping_settings(True, origin, rotation, invert,
+                                                  sync_widget=not from_widget)
+        except Exception as error:
+            (self.project.clip_enabled, self.project.clip_origin,
+             self.project.clip_rotation, self.project.clip_invert,
+             self.project.clip_initialized, self.project.modified) = previous
+            if self._clip_dialog is not None:
+                self._clip_dialog.set_settings(previous[1], previous[2], previous[3])
+            self._report_error("Не удалось изменить плоскость", error)
+        self.update_window_state()
+
+    def _clipping_moved(self, origin, rotation):
+        if self.project is None or not self.project.clip_enabled:
+            return
+        self._apply_clipping_from_dialog(origin, rotation, self.project.clip_invert,
+                                         from_widget=True)
+        if self._clip_dialog is not None:
+            self._clip_dialog.set_settings(self.project.clip_origin,
+                                           self.project.clip_rotation,
+                                           self.project.clip_invert)
 
     def update_3d_viewer(self):
         self._render_project(self.project)
@@ -361,11 +475,15 @@ class MainWindow(QMainWindow):
         try:
             if self.project.set_axis_scale(x, y, z):
                 self.viewer.set_axis_scale(self.project.axis_scale)
+                if self._clip_dialog is not None:
+                    self._clip_dialog.set_axis_scale(self.project.axis_scale)
         except Exception as error:
             self.project.axis_scale = previous
             self.project.modified = was_modified
             try:
                 self.viewer.set_axis_scale(previous)
+                if self._clip_dialog is not None:
+                    self._clip_dialog.set_axis_scale(previous)
             except Exception:
                 logger.exception("Не удалось восстановить масштаб осей")
             self._report_error("Не удалось изменить масштаб осей", error)
@@ -392,6 +510,8 @@ class MainWindow(QMainWindow):
                                                  self.project.axes_grid_visible)
                     self.viewer.set_axes_format(self.project.axes_label_decimals,
                                                 self.project.axes_round_grid)
+                if self._clip_dialog is not None:
+                    self._clip_dialog.set_axis_scale(self.project.axis_scale)
         except Exception as error:
             (self.project.axis_scale, self.project.axes_visible,
              self.project.axes_grid_visible, self.project.axes_label_decimals,
@@ -401,6 +521,8 @@ class MainWindow(QMainWindow):
                     self.viewer.set_axis_scale(previous[0])
                     self.viewer.set_axes_display(previous[1], previous[2])
                     self.viewer.set_axes_format(previous[3], previous[4])
+                if self._clip_dialog is not None:
+                    self._clip_dialog.set_axis_scale(previous[0])
             except Exception:
                 logger.exception("Не удалось восстановить настройки осей")
             self._report_error("Не удалось изменить настройки осей", error)

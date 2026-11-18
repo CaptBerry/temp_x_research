@@ -82,6 +82,23 @@ class ProjectTests(unittest.TestCase):
                                            label_decimals=decimals, round_grid=round_grid)
             self.assertEqual((reopened.axes_label_decimals, reopened.axes_round_grid), (0, True))
 
+    def test_clipping_plane_settings_persist_and_validate(self):
+        self.assertTrue(self.project.set_clipping(True, (10, 20, -30), (15, 35, 70), True))
+        self.project.save()
+        reopened = Project.open(self.project.project_file)
+        self.assertTrue(reopened.clip_enabled)
+        self.assertEqual(reopened.clip_origin, (10, 20, -30))
+        self.assertEqual(reopened.clip_rotation, (15, 35, 70))
+        self.assertTrue(reopened.clip_invert)
+        self.assertTrue(reopened.clip_initialized)
+        self.assertFalse(reopened.modified)
+        for origin, rotation in (((float("nan"), 0, 0), (0, 0, 0)),
+                                 ((0, 0, 0), (0, float("inf"), 0))):
+            with self.assertRaises(ValueError):
+                reopened.set_clipping(True, origin, rotation)
+            self.assertEqual(reopened.clip_origin, (10, 20, -30))
+            self.assertFalse(reopened.modified)
+
     def test_old_per_object_scale_migrates_to_axes(self):
         cloud = self.project.import_file(self.cloud())
         self.project.save()
