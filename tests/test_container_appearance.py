@@ -128,7 +128,7 @@ class ContainerAppearanceTests(unittest.TestCase):
             project.save()
             manifest = json.loads(project.project_file.read_text(encoding="utf-8"))
             for node in manifest["tree"]["children"]:
-                node.pop("appearance")
+                node.pop("appearance", None)
             project.project_file.write_text(json.dumps(manifest), encoding="utf-8")
             reopened = Project.open(project.project_file)
             self.assertEqual(reopened.well_files()[0].appearance.mode, "wireframe")

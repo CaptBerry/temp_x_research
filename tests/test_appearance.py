@@ -47,7 +47,7 @@ class AppearanceTests(unittest.TestCase):
             project.save()
             data = json.loads(project.project_file.read_text(encoding="utf-8"))
             for node in data["tree"]["children"]:
-                del node["appearance"]
+                node.pop("appearance", None)
             project.project_file.write_text(json.dumps(data), encoding="utf-8")
             reopened = Project.open(project.project_file)
             self.assertEqual(reopened.pointclouds()[0].appearance, Appearance())
@@ -61,6 +61,7 @@ class AppearanceTests(unittest.TestCase):
                        {"point_size": float("nan")}, {"line_width": float("inf")},
                        {"point_size": 0}, {"line_width": -1}, {"point_size": True},
                        {"outline": "yes"}, {"point_shape": "unknown"}, {"typo": 1},
+                       {"prism_outline": "yes"},
                        {"opacity": -0.1}, {"opacity": 1.1}, {"opacity": float("nan")},
                        {"label_visible": "yes"}, {"label_color": "orange"},
                        {"label_font": "unknown"}, {"label_size": 7},

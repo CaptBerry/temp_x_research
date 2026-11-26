@@ -42,6 +42,9 @@ class PointCloud(ProjectObject):
 
     def validate(self):
         self.appearance.validate(self.TYPE)
+        if (self.appearance.mode == "cells" and not getattr(self, "is_corner_point", False)
+                and self.cell_edges() is None):
+            raise ValueError("Для отображения ячеек нужны центры в строках и слоях XYZ.")
         if self.appearance.color_map is not None:
             self.color_values(self.appearance.color_map.field)
         columns = (self.x_column, self.y_column, self.z_column)
@@ -79,6 +82,29 @@ class PointCloud(ProjectObject):
         if not np.isfinite(values).any():
             raise ValueError("Параметр палитры не содержит числовых значений.")
         return values
+
+    def cell_edges(self):
+        """Cell boundaries for samples arranged in reasonably dense XYZ rows."""
+        coordinates = self.coordinates
+        if coordinates is None or not len(coordinates):
+            return None
+        axes = tuple(np.unique(coordinates[:, axis]) for axis in range(3))
+        count = int(np.prod([len(axis) for axis in axes]))
+        if (count > 2_000_000 or count > 8 * len(coordinates)
+                or len(coordinates) != len(np.unique(coordinates, axis=0))):
+            return None
+        steps = [float(np.median(np.diff(axis))) for axis in axes if len(axis) > 1]
+        singleton_size = min(steps) if steps else 1.0
+        edges = []
+        for axis in axes:
+            if len(axis) == 1:
+                edges.append(np.array([axis[0] - singleton_size / 2,
+                                       axis[0] + singleton_size / 2]))
+            else:
+                middle = (axis[:-1] + axis[1:]) / 2
+                edges.append(np.r_[axis[0] - (axis[1] - axis[0]) / 2,
+                                   middle, axis[-1] + (axis[-1] - axis[-2]) / 2])
+        return tuple(edges)
 
 
     def to_dict(self) -> dict:

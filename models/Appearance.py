@@ -13,6 +13,7 @@ class Appearance:
     point_size: float = 6.0
     point_shape: str = "circle"
     outline: bool = False
+    prism_outline: bool | None = None
     outline_color: str = "#222222"
     line_width: float = 1.0
     color_map: ColorMap | None = None
@@ -24,9 +25,13 @@ class Appearance:
 
     @staticmethod
     def modes(object_type):
+        if object_type in ("display_points", "layered_display_points"):
+            return ("points", "spheres", "corner_grid", "grid_wireframe")
         if object_type == "pointcloud":
-            return ("points", "spheres")
-        if object_type in ("cube", "layered_cube"):
+            return ("points", "spheres", "cells")
+        if object_type == "cube":
+            return ("points", "spheres", "cells", "surface", "wireframe")
+        if object_type == "layered_cube":
             return ("points", "spheres", "surface", "wireframe")
         if object_type in ("well", "wellfile"):
             return ("wireframe", "points", "spheres")
@@ -54,6 +59,8 @@ class Appearance:
             raise ValueError("Неизвестная форма точки.")
         if type(self.outline) is not bool:
             raise ValueError("Обводка должна быть включена или выключена.")
+        if self.prism_outline is not None and type(self.prism_outline) is not bool:
+            raise ValueError("Обводка призм должна быть включена или выключена.")
         if type(self.label_visible) is not bool:
             raise ValueError("Подпись скважины должна быть включена или выключена.")
         if self.label_font not in ("arial", "times", "courier"):

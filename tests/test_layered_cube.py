@@ -132,6 +132,8 @@ class LayeredCubeTests(unittest.TestCase):
             np.testing.assert_allclose(cube.get_layer(2).color_values("LAYER_INDEX"), [2, 2])
 
             dialog = ImportDialog()
+            self.assertEqual(dialog.object_type, "display_points")
+            dialog.comboBoxObjectType.setCurrentIndex(dialog.comboBoxObjectType.findData("cube"))
             dialog.lineEditPathFile.setText(str(source))
             dialog.load_preview()
             self.assertEqual(dialog.object_type, "cube")

@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from PyQt6 import uic
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QDialog, QFileDialog, QPushButton, QLineEdit, QTableView, QComboBox, QListWidget, QCheckBox, QMessageBox, QWidget, QHBoxLayout, QLabel, QSpinBox, QDoubleSpinBox
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtWidgets import QDialog, QFileDialog, QPushButton, QLineEdit, QTableView, QComboBox, QListWidget, QCheckBox, QMessageBox, QWidget, QHBoxLayout, QLabel, QSpinBox, QDoubleSpinBox, QProgressBar
 
 import pandas as pd
 
@@ -15,6 +15,49 @@ from models.DataFrameProxyModel import DataFrameProxyModel
 from models.DataFrameModel import DataFrameModel
 from importers.ObjectFactory import (build_table_object, build_mesh_surface,
                                      build_corner_point_cube, MESH_SUFFIXES)
+
+
+ASYNC_TABLE_FILE_BYTES = 16 * 1024 * 1024
+
+
+class TableImportWorker(QThread):
+    progress = pyqtSignal(int)
+
+    def __init__(self, filename, coordinates, parameters, options, parent=None):
+        super().__init__(parent)
+        self.filename, self.coordinates, self.parameters = filename, coordinates, parameters
+        self.options = options
+        self.result = None
+        self.error = None
+
+    def run(self):
+        try:
+            if self.options["layered_dat"]:
+                frame = load_layer_intervals(
+                    self.filename, self.coordinates, self.options["layer_column"],
+                    self.options["roof_column"], self.options["base_column"], self.parameters,
+                    cancelled=self.isInterruptionRequested, progress=self.progress.emit)
+            else:
+                frame = CsvImporter().load(self.filename, delimiter=self.options["delimiter"],
+                                           header=self.options["header"])
+            if self.isInterruptionRequested():
+                raise InterruptedError("Импорт отменён.")
+            if frame.empty:
+                raise ValueError("Файл не содержит строк данных.")
+            obj = build_table_object(self.options["object_type"], frame, self.filename,
+                                     self.coordinates, self.parameters,
+                                     self.options["id_column"], self.options["surface_kind"],
+                                     cube_geometry=self.options["geometry"],
+                                     grid_dimensions=self.options["dimensions"],
+                                     singleton_size=self.options["singleton_size"],
+                                     connect_existing=self.options["connect_existing"],
+                                     layer_column=self.options["layer_column"],
+                                     roof_column=self.options["roof_column"],
+                                     base_column=self.options["base_column"],
+                                     z_direction=self.options["z_direction"])
+            self.result = (frame, obj)
+        except Exception as error:
+            self.error = error
 
 
 class ImportDialog(QDialog):
@@ -34,6 +77,9 @@ class ImportDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self._import_worker = None
+        self._cancel_import = False
 
         self.importer = CsvImporter()
 
@@ -61,18 +107,27 @@ class ImportDialog(QDialog):
         self.label_6.setText("Файл")
         self.buttonBrowse.setText("Обзор…")
         self.label_7.setText("Разделитель")
+        self.comboBox_Delimetr.setToolTip("Десятичная точка/запятая и кодировка UTF-8/Windows-1251 определяются автоматически.")
         self.label_8.setText("Заголовок")
         self.label.setText("Предпросмотр")
         self.label_2.setText("Назначение колонок")
         self.buttonCancel.setText("Отмена")
         self.buttonImport.setText("Импортировать")
+        self.import_progress_label = QLabel("Чтение данных…", self)
+        self.import_progress = QProgressBar(self)
+        self.import_progress.setRange(0, 0)
+        self.layout().insertWidget(self.layout().count() - 1, self.import_progress_label)
+        self.layout().insertWidget(self.layout().count() - 1, self.import_progress)
+        self.import_progress_label.hide()
+        self.import_progress.hide()
         for index, (label, value) in enumerate((("Авто", "auto"), ("Запятая", "comma"),
                                                  ("Точка с запятой", "semicolon"),
                                                  ("Табуляция", "tab"), ("Пробел", "space"))):
             self.comboBox_Delimetr.setItemText(index, label)
             self.comboBox_Delimetr.setItemData(index, value)
         self.comboBoxObjectType = QComboBox()
-        for label, value in (("Облако точек", "pointcloud"), ("Скважина", "well"),
+        for label, value in (("Точки с настраиваемой сеткой", "display_points"),
+                             ("Облако точек", "pointcloud"), ("Скважина", "well"),
                              ("Файл скважин", "wellfile"), ("Куб данных", "cube"),
                              ("Поверхность", "surface")):
             self.comboBoxObjectType.addItem(label, value)
@@ -110,10 +165,47 @@ class ImportDialog(QDialog):
                              ("Corner-point: по рядам центров", "rows"),
                              ("Corner-point: равномерная", "uniform"),
                              ("Послойная модель (кровля/подошва)", "layered"),
-                             ("Только точки (без ячеек)", "nodes")):
+                             ("Узловой куб: исходные XYZ без усреднения", "nodes")):
             self.comboBoxCubeGeometry.addItem(label, value)
+        self.comboBoxCubeGeometry.setToolTip(
+            "Для патчей по исходной сетке выберите узловой куб. "
+            "Corner-point: автоматически может усреднять исходные точки в новой сетке.")
         cube_mode_layout.addWidget(self.comboBoxCubeGeometry)
         self.tab.layout().insertWidget(4, self.cube_mode_row)
+        self.display_layout_row = QWidget(self)
+        display_layout = QHBoxLayout(self.display_layout_row)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.addWidget(QLabel("Структура точек"))
+        self.comboBoxDisplayLayout = QComboBox()
+        for label, value in (("Исходные XYZ без слоёв", "xyz"),
+                             ("Исходные XYZ, разделить по колонке слоя", "layers"),
+                             ("Интервалы слоёв: XY, кровля и подошва", "intervals")):
+            self.comboBoxDisplayLayout.addItem(label, value)
+        display_layout.addWidget(self.comboBoxDisplayLayout)
+        self.tab.layout().insertWidget(4, self.display_layout_row)
+        self.display_hint = QLabel(
+            "Сохраняются точки и назначение слоёв. Corner-point grid строится только для "
+            "отображения; его размеры и способ построения задаются после импорта в панели «Отображение». "
+            "Для интервалов точка располагается посередине между кровлей и подошвой.", self)
+        self.display_hint.setWordWrap(True)
+        self.tab.layout().insertWidget(5, self.display_hint)
+        self.display_layout_row.hide()
+        self.display_hint.hide()
+        self.display_z_row = QWidget(self)
+        z_layout = QHBoxLayout(self.display_z_row)
+        z_layout.setContentsMargins(0, 0, 0, 0)
+        z_layout.addWidget(QLabel("Направление Z"))
+        self.comboBoxZDirection = QComboBox()
+        for label, value in (("Авто: по кровле и подошве", "auto"),
+                             ("Высоты: Z увеличивается вверх", "up"),
+                             ("Глубины: Z увеличивается вниз", "down")):
+            self.comboBoxZDirection.addItem(label, value)
+        self.comboBoxZDirection.setToolTip(
+            "Для интервалов авто определяет направление по кровле/подошве. "
+            "Для исходных XYZ авто означает высоты. Данные в таблице не меняются.")
+        z_layout.addWidget(self.comboBoxZDirection)
+        self.tab.layout().insertWidget(5, self.display_z_row)
+        self.display_z_row.hide()
         self.layer_columns_row = QWidget(self)
         layer_layout = QHBoxLayout(self.layer_columns_row)
         layer_layout.setContentsMargins(0, 0, 0, 0)
@@ -159,7 +251,8 @@ class ImportDialog(QDialog):
         self.cube_hint = QLabel("XYZ задают центры ячеек. По рядам — одна ячейка на точку; "
                                 "без рядов — усреднение точек в равномерной сетке. "
                                 "Пустые ячейки неактивны; их интервалы можно перекрыть "
-                                "расширением существующих ячеек.", self)
+                                "расширением существующих ячеек. "
+                                "Для патчей по исходной сетке выберите узловой куб.", self)
         self.cube_hint.setWordWrap(True)
         self.tab.layout().insertWidget(8, self.cube_hint)
         self.tab.layout().removeWidget(self.layer_columns_row)
@@ -179,6 +272,7 @@ class ImportDialog(QDialog):
         self._corner_preview_cube = None
         self._layer_dat_preview = False
         self._auto_layer_dat_source = None
+        self._sync_cube_controls()
         self.buttonImport.setEnabled(False)
         self.tabWidget.setTabText(0, "Данные")
         self.tabWidget.removeTab(1)
@@ -198,17 +292,26 @@ class ImportDialog(QDialog):
         self.lineEditPathFile.editingFinished.connect(self.reload_preview)
         self.comboBoxObjectType.currentIndexChanged.connect(self._type_changed)
         self.comboBoxCubeGeometry.currentIndexChanged.connect(self._sync_cube_controls)
+        self.comboBoxDisplayLayout.currentIndexChanged.connect(self._sync_cube_controls)
 
     @property
     def object_type(self):
         return self.comboBoxObjectType.currentData()
 
     def _type_changed(self):
+        if self.object_type == "display_points" and self._layer_dat_preview:
+            self.comboBoxDisplayLayout.setCurrentIndex(
+                self.comboBoxDisplayLayout.findData("intervals"))
         self.well_id_row.setVisible(self.object_type in ("well", "wellfile"))
         self.surface_kind_row.setVisible(self.object_type == "surface")
         self.listWidgetParametrs.setEnabled(self.object_type != "surface")
         self.label_2.setText("Назначение колонок (поверхность: только XYZ)"
-                             if self.object_type == "surface" else "Назначение колонок")
+                             if self.object_type == "surface" else
+                             "Координаты и класс/атрибуты отметок скважин"
+                             if self.object_type in ("well", "wellfile") else "Назначение колонок")
+        self.listWidgetParametrs.setToolTip(
+            "Выберите колонку класса, например class. Предикторы модели извлекаются из куба."
+            if self.object_type in ("well", "wellfile") else "Выберите параметры объекта.")
         self._sync_cube_controls()
         self.reload_preview()
 
@@ -216,14 +319,23 @@ class ImportDialog(QDialog):
         is_cube_table = (self.object_type == "cube" and
                          Path(self.lineEditPathFile.text().strip()).suffix.lower() != ".grdecl")
         mode = self.comboBoxCubeGeometry.currentData()
+        display = self.object_type == "display_points"
+        display_layout = self.comboBoxDisplayLayout.currentData()
+        intervals = display and display_layout == "intervals"
+        layers = is_cube_table and mode == "layered"
+        self.display_layout_row.setVisible(display)
+        self.display_z_row.setVisible(display)
+        self.display_hint.setVisible(display)
         self.cube_mode_row.setVisible(is_cube_table)
-        self.layer_columns_row.setVisible(is_cube_table and mode == "layered")
+        self.layer_columns_row.setVisible(layers or display and display_layout != "xyz")
+        self.comboBoxRoof.setEnabled(not display or intervals)
+        self.comboBoxBase.setEnabled(not display or intervals)
         self.layer_hint.setVisible(is_cube_table and mode == "layered")
         self.cube_size_row.setVisible(is_cube_table and mode in ("auto", "uniform", "layered"))
         self.cube_dimension_spins[2].setEnabled(mode != "layered")
         self.comboBoxMapZ.setEnabled(
             Path(self.lineEditPathFile.text().strip()).suffix.lower() != ".grdecl"
-            and (not is_cube_table or mode != "layered"))
+            and (not is_cube_table or mode != "layered") and not intervals)
         self.cube_single_row.setVisible(is_cube_table and mode != "nodes")
         self.cubeConnectCheck.setVisible(is_cube_table and mode not in ("nodes", "layered"))
         self.cube_hint.setVisible(is_cube_table and mode not in ("nodes", "layered"))
@@ -284,12 +396,12 @@ class ImportDialog(QDialog):
                                            and self.checkBox_Header.isChecked())
                 if self._layer_dat_preview and self._auto_layer_dat_source != filename:
                     self._auto_layer_dat_source = filename
-                    self.comboBoxObjectType.blockSignals(True)
-                    self.comboBoxObjectType.setCurrentIndex(
-                        self.comboBoxObjectType.findData("cube"))
-                    self.comboBoxObjectType.blockSignals(False)
-                    self.comboBoxCubeGeometry.setCurrentIndex(
-                        self.comboBoxCubeGeometry.findData("layered"))
+                    if self.object_type == "display_points":
+                        self.comboBoxDisplayLayout.setCurrentIndex(
+                            self.comboBoxDisplayLayout.findData("intervals"))
+                    elif self.object_type == "cube":
+                        self.comboBoxCubeGeometry.setCurrentIndex(
+                            self.comboBoxCubeGeometry.findData("layered"))
                     self._sync_cube_controls()
         except Exception as error:
             self.tableModel.clear()
@@ -359,6 +471,8 @@ class ImportDialog(QDialog):
         if self._layer_dat_preview:
             self.comboBoxMapX.setCurrentIndex(columns.index("PKX"))
             self.comboBoxMapY.setCurrentIndex(columns.index("PKY"))
+            if self.object_type == "display_points" and "H" in columns:
+                self.comboBoxMapZ.setCurrentIndex(columns.index("H"))
 
         self.listWidgetParametrs.clear()
 
@@ -414,7 +528,9 @@ class ImportDialog(QDialog):
         if self.object_type == "surface":
             return []
         parameters = []
-        layered = self.object_type == "cube" and self.comboBoxCubeGeometry.currentData() == "layered"
+        display = self.object_type == "display_points"
+        layered = (self.object_type == "cube" and self.comboBoxCubeGeometry.currentData() == "layered"
+                   or display and self.comboBoxDisplayLayout.currentData() == "intervals")
         coordinates = {self.comboBoxMapX.currentText(), self.comboBoxMapY.currentText()}
         if not layered:
             coordinates.add(self.comboBoxMapZ.currentText())
@@ -423,7 +539,8 @@ class ImportDialog(QDialog):
             item = self.listWidgetParametrs.item(row)
 
             if (item.checkState() == Qt.CheckState.Checked and item.text() not in coordinates
-                    and (not layered or item.text() != self.comboBoxLayer.currentText())):
+                    and (not (layered or display and self.comboBoxDisplayLayout.currentData() == "layers")
+                         or item.text() != self.comboBoxLayer.currentText())):
                 parameters.append(item.text())
 
         return parameters
@@ -441,6 +558,46 @@ class ImportDialog(QDialog):
         )
         self.parameter_columns = self.selected_parameters()
 
+        layered_dat = (self._layer_dat_preview and (
+            self.object_type == "cube" and self.comboBoxCubeGeometry.currentData() == "layered"
+            or self.object_type == "display_points" and
+            self.comboBoxDisplayLayout.currentData() == "intervals"))
+        try:
+            background = (self._corner_preview_cube is None and not self._mesh_preview
+                          and Path(filename).stat().st_size >= ASYNC_TABLE_FILE_BYTES)
+        except OSError as error:
+            QMessageBox.warning(self, "Не удалось импортировать данные", str(error))
+            return
+        if background:
+            options = {"object_type": self.object_type,
+                       "layered_dat": layered_dat,
+                       "delimiter": self.current_delimiter(),
+                       "header": self.checkBox_Header.isChecked(),
+                       "id_column": self.comboBoxWellId.currentText() or None,
+                       "surface_kind": self.comboBoxSurfaceKind.currentData(),
+                       "geometry": (self.comboBoxDisplayLayout.currentData() if self.object_type == "display_points"
+                                    else self.comboBoxCubeGeometry.currentData()),
+                       "dimensions": tuple(spin.value() for spin in self.cube_dimension_spins),
+                       "singleton_size": self.cubeSingletonSize.value(),
+                       "connect_existing": self.cubeConnectCheck.isChecked(),
+                       "layer_column": self.comboBoxLayer.currentText() or None,
+                       "roof_column": self.comboBoxRoof.currentText() or None,
+                       "base_column": self.comboBoxBase.currentText() or None,
+                       "z_direction": self.comboBoxZDirection.currentData()}
+            self._cancel_import = False
+            self._import_worker = TableImportWorker(filename, self.coordinate_columns,
+                                                     self.parameter_columns, options, self)
+            self._import_worker.progress.connect(self._show_import_progress)
+            self._import_worker.finished.connect(self._finish_background_import)
+            self.tabWidget.setEnabled(False)
+            self.buttonImport.setEnabled(False)
+            self.buttonCancel.setText("Отменить загрузку")
+            self.import_progress_label.setText("Чтение данных…")
+            self.import_progress_label.show()
+            self.import_progress.show()
+            self._import_worker.start()
+            return
+
         try:
             if self._corner_preview_cube is not None:
                 self.import_object = self._corner_preview_cube
@@ -449,8 +606,7 @@ class ImportDialog(QDialog):
                 self.dataframe = None
                 self.import_object = build_mesh_surface(filename, self.comboBoxSurfaceKind.currentData())
             else:
-                if (self._layer_dat_preview and self.object_type == "cube" and
-                        self.comboBoxCubeGeometry.currentData() == "layered"):
+                if layered_dat:
                     self.dataframe = load_layer_intervals(
                         filename, self.coordinate_columns,
                         self.comboBoxLayer.currentText(), self.comboBoxRoof.currentText(),
@@ -467,15 +623,61 @@ class ImportDialog(QDialog):
                     self.object_type, self.dataframe, filename, self.coordinate_columns,
                     self.parameter_columns, self.comboBoxWellId.currentText() or None,
                     self.comboBoxSurfaceKind.currentData(),
-                    cube_geometry=self.comboBoxCubeGeometry.currentData() if self.object_type == "cube" else "nodes",
+                    cube_geometry=(self.comboBoxDisplayLayout.currentData() if self.object_type == "display_points"
+                                   else self.comboBoxCubeGeometry.currentData() if self.object_type == "cube" else "nodes"),
                     grid_dimensions=tuple(spin.value() for spin in self.cube_dimension_spins),
                     singleton_size=self.cubeSingletonSize.value(),
                     connect_existing=self.cubeConnectCheck.isChecked(),
                     layer_column=self.comboBoxLayer.currentText() or None,
                     roof_column=self.comboBoxRoof.currentText() or None,
-                    base_column=self.comboBoxBase.currentText() or None)
+                    base_column=self.comboBoxBase.currentText() or None,
+                    z_direction=self.comboBoxZDirection.currentData())
         except Exception as error:
             QMessageBox.warning(self, "Не удалось импортировать данные", str(error))
             return
 
         self.accept()
+
+    def _show_import_progress(self, count):
+        if not self._cancel_import:
+            self.import_progress_label.setText(f"Чтение слоёв: обработано строк {count:,}".replace(",", " "))
+
+    def _finish_background_import(self):
+        worker = self._import_worker
+        if worker is None:
+            return
+        self._import_worker = None
+        self.import_progress.hide()
+        self.import_progress_label.hide()
+        self.tabWidget.setEnabled(True)
+        self.buttonImport.setEnabled(True)
+        self.buttonCancel.setEnabled(True)
+        self.buttonCancel.setText("Отмена")
+        if self._cancel_import or isinstance(worker.error, InterruptedError):
+            worker.deleteLater()
+            super().reject()
+            return
+        if worker.error is not None:
+            error = worker.error
+            worker.deleteLater()
+            QMessageBox.warning(self, "Не удалось импортировать данные", str(error))
+            return
+        self.dataframe, self.import_object = worker.result
+        worker.deleteLater()
+        self.accept()
+
+    def reject(self):
+        if self._import_worker is not None:
+            self._cancel_import = True
+            self._import_worker.requestInterruption()
+            self.buttonCancel.setEnabled(False)
+            self.import_progress_label.setText("Остановка загрузки…")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._import_worker is not None:
+            event.ignore()
+            self.reject()
+            return
+        super().closeEvent(event)

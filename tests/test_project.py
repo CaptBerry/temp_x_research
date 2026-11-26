@@ -104,7 +104,7 @@ class ProjectTests(unittest.TestCase):
         self.project.save()
         manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
         manifest.pop("axis_scale")
-        manifest["tree"]["children"][0]["appearance"].update(
+        next(node for node in manifest["tree"]["children"] if node["uuid"] == cloud.uuid)["appearance"].update(
             scale_x=2, scale_y=0.5, scale_z=4)
         self.project.project_file.write_text(json.dumps(manifest), encoding="utf-8")
         reopened = Project.open(self.project.project_file)
@@ -186,7 +186,8 @@ class ProjectTests(unittest.TestCase):
 
         self.project.save()
         manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
-        paths = [node["file_path"] for node in manifest["tree"]["children"]]
+        paths = [node["file_path"] for node in manifest["tree"]["children"]
+                 if node["uuid"] in (first.uuid, second.uuid)]
         self.assertEqual([Path(path).name for path in paths], ["points.csv", "points.csv"])
         self.assertNotEqual(paths[0], paths[1])
         self.assertEqual((self.project.project_path / paths[0]).read_bytes(), first_bytes)
@@ -198,6 +199,21 @@ class ProjectTests(unittest.TestCase):
                          ["points.csv", "points.csv"])
         self.assertEqual([Path(obj.file_path).read_bytes() for obj in copied.pointclouds()],
                          [first_bytes, second_path.read_bytes()])
+
+    def test_large_source_is_copied_with_bounded_reads_and_repaired_if_corrupt(self):
+        source = self.directory / "large.dat"
+        content = (b"0123456789abcdef" * 600_000) + b"end"
+        source.write_bytes(content)
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
+            relative = ProjectStorage._store_source(self.project.project_path, source, source.name)
+            target = self.project.project_path / relative
+            with target.open("rb") as stream:
+                self.assertEqual(stream.read(), content)
+            target.write_bytes(b"corrupt")
+            self.assertEqual(ProjectStorage._store_source(
+                self.project.project_path, source, source.name), relative)
+            with target.open("rb") as stream:
+                self.assertEqual(stream.read(), content)
 
     def test_delete_cleans_unreferenced_work_and_source_after_save(self):
         first = self.project.import_file(self.cloud("First"))
@@ -349,14 +365,14 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(reopened.locked)
 
     def test_corrupt_version_missing_asset_and_path_traversal(self):
-        self.project.import_file(self.cloud())
+        cloud = self.project.import_file(self.cloud())
         self.project.save()
         valid = json.loads(self.project.project_file.read_text(encoding="utf-8"))
         for version, asset in [(999, None), (3, "../outside.npz"), (3, "work/missing.npz")]:
             data = json.loads(json.dumps(valid))
             data["version"] = version
             if asset:
-                data["tree"]["children"][0]["data_file"] = asset
+                next(node for node in data["tree"]["children"] if node["uuid"] == cloud.uuid)["data_file"] = asset
             self.project.project_file.write_text(json.dumps(data), encoding="utf-8")
             with self.subTest(version=version, asset=asset), self.assertRaises((ValueError, OSError)):
                 Project.open(self.project.project_file)
@@ -366,7 +382,7 @@ class ProjectTests(unittest.TestCase):
         self.project.save()
         original_manifest = self.project.project_file.read_bytes()
         manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
-        relative = manifest["tree"]["children"][0]["data_file"]
+        relative = next(node for node in manifest["tree"]["children"] if node["uuid"] == cloud.uuid)["data_file"]
         data_file = self.project.project_path / relative
         contents = data_file.read_bytes()
         data_file.unlink()
@@ -386,7 +402,7 @@ class ProjectTests(unittest.TestCase):
         cloud = self.project.import_file(self.cloud())
         self.project.save()
         manifest = json.loads(self.project.project_file.read_text(encoding="utf-8"))
-        relative = manifest["tree"]["children"][0]["file_path"]
+        relative = next(node for node in manifest["tree"]["children"] if node["uuid"] == cloud.uuid)["file_path"]
         (self.project.project_path / relative).unlink()
 
         reopened = Project.open(self.project.project_file)

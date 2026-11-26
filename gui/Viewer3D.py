@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import replace
 from itertools import product
 
 from PyQt6.QtCore import pyqtSignal
@@ -16,10 +17,17 @@ from scene.axis_ticks import readable_axis_labels, rounded_axis_range
 from scene.clipping import plane_basis, rotation_for_normal, validate_clipping
 from models.PointCloud import PointCloud
 from models.DataCube import DataCube
+from models.DisplayPoints import DisplayPoints
 from models.Surface import Surface
 from models.Well import Well
+from models.CalculationArtifact import CatalogWell
+from models.catalog_geometry import catalog_geometry
+from models.duplicates import supports_duplicates, duplicate_root, duplicate_info, duplicate_batch
 from renderers.surface_renderer import SurfaceRenderer
 from renderers.corner_point_renderer import render_corner_point_grid
+from renderers.point_cells import render_point_cells
+from renderers.display_points import render_display_points
+from renderers.interpolated_grid import interpolation_batch
 from renderers.appearance import (apply_appearance, apply_color_map,
                                   filtered_palette_mesh, set_point_viewport)
 
@@ -35,10 +43,16 @@ class Viewer3D(QWidget):
 
         # словарь акторов
         self.actors = {}
+        self._hidden_actors = {}
+        self._hidden_ids = set()
         self._source_meshes = {}
+        self._display_objects = {}
+        self._duplicate_actors = {}
+        self._duplicate_signatures = {}
         self.well_label_actors = {}
         self._well_label_anchor_indices = {}
         self._visible_wells = {}
+        self._catalog_actors = {}
 
         self.camera = SceneCamera()
         self.scene_bounds = None
@@ -118,15 +132,87 @@ class Viewer3D(QWidget):
         self.plotter.clear()
         self.plotter.show_axes()
         self.actors.clear()
+        self._hidden_actors.clear()
+        self._hidden_ids.clear()
         self._source_meshes.clear()
+        self._display_objects.clear()
+        self._duplicate_actors.clear()
+        self._duplicate_signatures.clear()
         self.well_label_actors.clear()
         self._well_label_anchor_indices.clear()
         self._visible_wells.clear()
+        self._catalog_actors.clear()
         self.scene_bounds = None
         self.bounds_axes_actor = None
         self._axis_base_labels = ()
         self._axis_visible_labels = [None, None, None]
         self.clip_enabled = False
+
+    def highlight_sample(self, sample, cube=None, shape=(1, 1, 1), neighbor_coordinates=None):
+        """Transient sample and patch selection, outside the project object tree."""
+        self.plotter.remove_actor("canvas_sample", render=False)
+        self.plotter.remove_actor("canvas_patch", render=False)
+        self.plotter.remove_actor("canvas_patch_bounds", render=False)
+        self.plotter.remove_actor("canvas_well", render=False)
+        point = np.array([sample.x, sample.y, sample.z], dtype=float)
+        actor = self.plotter.add_points(point.reshape(1, 3), color="#ff5577", point_size=16,
+                                       render_points_as_spheres=True, name="canvas_sample", render=False)
+        self._apply_axis_scale(actor)
+        points = np.empty((0, 3))
+        if neighbor_coordinates is not None:
+            points = np.asarray(neighbor_coordinates)
+            points = points[np.isfinite(points).all(axis=1)]
+        elif isinstance(cube, DataCube) and sample.get("cell_id", -1) >= 0:
+            if cube.is_corner_point:
+                logical = cube.corner_grid.active_indices
+                center = logical[int(sample.cell_id)]
+                selected = np.all(np.abs(logical - center) <= np.array(shape) // 2, axis=1)
+                points = cube.corner_grid.cell_corners()[selected].reshape(-1, 3)
+            else:
+                axes = [np.unique(cube.coordinates[:, a]) for a in range(3)]
+                center = cube.coordinates[int(sample.cell_id)]
+                limits = np.array([(axis[max(0, np.searchsorted(axis, v) - radius)],
+                                    axis[min(len(axis) - 1, np.searchsorted(axis, v) + radius)])
+                                   for axis, v, radius in zip(axes, center, np.array(shape)[::-1] // 2)])
+                selected = np.all((cube.coordinates >= limits[:, 0]) & (cube.coordinates <= limits[:, 1]), axis=1)
+                points = cube.coordinates[selected]
+        if len(points):
+            actor = self.plotter.add_points(points, color="#ffcc66", point_size=9,
+                                           name="canvas_patch", render_points_as_spheres=True, render=False)
+            self._apply_axis_scale(actor)
+            lo, hi = points.min(axis=0), points.max(axis=0)
+            padding = np.maximum((hi - lo) * .02, 1e-4)
+            bounds = np.column_stack([lo - padding, hi + padding]).ravel()
+            actor = self.plotter.add_mesh(pv.Box(bounds=bounds), style="wireframe", color="#ffcc66",
+                                         line_width=3, name="canvas_patch_bounds", render=False)
+            self._apply_axis_scale(actor)
+            self.camera.focus_on_bounds(self.plotter, actor.bounds)
+        self.plotter.render()
+
+    def highlight_catalog_well(self, catalog):
+        columns = ["source_x", "source_y", "source_z"] if "source_x" in catalog else ["x", "y", "z"]
+        points = catalog.sort_values("source_row")[columns].drop_duplicates().to_numpy(float)
+        self.plotter.remove_actor("canvas_well", render=False)
+        if len(points) > 1:
+            actor = self.plotter.add_mesh(pv.lines_from_points(points), color="#f6a94b", line_width=4,
+                                         name="canvas_well", render=False)
+            self._apply_axis_scale(actor)
+        self.plotter.render()
+
+    def focus_on_object(self, obj):
+        objects = [obj]
+        for current in objects:
+            objects.extend(current.children)
+        bounds = [actor.bounds for o in objects for actor in self._catalog_actors.get(o.uuid, ())
+                  if actor.visibility]
+        bounds.extend(self.actors[o.uuid].bounds for o in objects
+                      if o.uuid in self.actors and o.uuid not in self._catalog_actors)
+        bounds.extend(self._duplicate_actors[o.uuid].bounds for o in objects
+                      if o.uuid in self._duplicate_actors and self._duplicate_actors[o.uuid].visibility)
+        if bounds:
+            bounds = np.array(bounds)
+            combined = tuple(v for axis in range(3) for v in (bounds[:, axis * 2].min(), bounds[:, axis * 2 + 1].max()))
+            self.camera.focus_on_bounds(self.plotter, combined)
 
     @contextmanager
     def scene_update(self):
@@ -137,7 +223,13 @@ class Viewer3D(QWidget):
         self.plotter.setUpdatesEnabled(False)
         completed = False
         try:
-            yield
+            with interpolation_batch(), duplicate_batch():
+                yield
+                had_markers = bool(self._duplicate_actors)
+                self._sync_duplicate_markers()
+                if had_markers or self._duplicate_actors:
+                    self._recompute_scene_bounds()
+                    self.update_coordinate_axes()
             completed = True
         finally:
             self.plotter.suppress_rendering = was_suppressed
@@ -147,6 +239,8 @@ class Viewer3D(QWidget):
 
 
     def add_object(self, obj):
+        if isinstance(obj, CatalogWell):
+            return self.add_catalog(obj)
         if isinstance(obj, Well):
             return self.add_well(obj)
         if isinstance(obj, DataCube) and obj.is_corner_point:
@@ -166,6 +260,44 @@ class Viewer3D(QWidget):
             self.actors[obj.uuid] = actor
             self._recompute_scene_bounds()
             return actor
+
+    def add_catalog(self, well):
+        """One catalog well with its trace, sample marks and exact source links."""
+        geometry = catalog_geometry(well.parent, well.well_uuid)
+        actors = []
+
+        def lines(points, edges, color, width, suffix, opacity=1.0):
+            if not len(edges):
+                return
+            mesh = pv.PolyData(points)
+            mesh.lines = np.column_stack((np.full(len(edges), 2), edges)).ravel()
+            actors.append(self.plotter.add_mesh(
+                mesh, color=color, line_width=width, opacity=opacity,
+                name=f"{well.uuid}:{suffix}", show_scalar_bar=False,
+                reset_camera=False, render=False, pickable=False))
+
+        lines(geometry.trajectory_points, geometry.trajectory_lines, "#f6a94b", 3, "well")
+        if len(geometry.sample_points):
+            actors.append(self.plotter.add_points(
+                geometry.sample_points, color="#ff5577", point_size=9,
+                render_points_as_spheres=True, name=f"{well.uuid}:samples",
+                reset_camera=False, render=False, show_scalar_bar=False, pickable=False))
+        if len(geometry.source_points):
+            actors.append(self.plotter.add_points(
+                geometry.source_points, color="#49c5d6", point_size=6,
+                render_points_as_spheres=True, name=f"{well.uuid}:sources",
+                reset_camera=False, render=False, show_scalar_bar=False, pickable=False))
+            lines(np.vstack((geometry.sample_points, geometry.source_points)),
+                  geometry.links, "#9ca8b6", 1, "links", opacity=.55)
+        if not actors:
+            return None
+        for actor in actors:
+            self._apply_axis_scale(actor)
+            self._attach_clipping(actor)
+        self._catalog_actors[well.uuid] = actors
+        self.actors[well.uuid] = actors[0]
+        self._recompute_scene_bounds()
+        return actors[0]
 
     def add_corner_point_cube(self, cube):
         mesh = render_corner_point_grid(cube.corner_grid)
@@ -258,48 +390,232 @@ class Viewer3D(QWidget):
             if anchor_index != self._well_label_anchor_indices.get(well.uuid):
                 self._sync_well_label(well)
 
-    def add_point_cloud(self, point_cloud):
+    def add_point_cloud(self, point_cloud, *, force_points=False):
         coordinates = point_cloud.coordinates
 
         if coordinates is None or len(coordinates) == 0:
             return None
 
-        mesh = pv.PolyData(coordinates)
+        grid_display = (not force_points and isinstance(point_cloud, DisplayPoints)
+                        and point_cloud.appearance.mode in ("corner_grid", "grid_wireframe"))
+        mesh = (render_display_points(point_cloud) if grid_display else
+                render_point_cells(point_cloud) if point_cloud.appearance.mode == "cells"
+                else pv.PolyData(coordinates))
         mesh = self._display_mesh(point_cloud, mesh)
         if mesh is None:
+            self._update_duplicate_marker(point_cloud)
             return None
-        actor = self.plotter.add_points(
-            mesh,
-            name=point_cloud.uuid,
-            render_points_as_spheres=False,
-            color=point_cloud.appearance.color,
-            reset_camera=False,
-            render=False,
-            show_scalar_bar=False,
-        )
-        apply_appearance(actor, point_cloud.appearance, self._point_viewport())
+        if grid_display or point_cloud.appearance.mode == "cells":
+            actor = self.add_mesh(mesh, name=point_cloud.uuid)
+        else:
+            actor = self.plotter.add_points(
+                mesh, name=point_cloud.uuid, render_points_as_spheres=False,
+                color=point_cloud.appearance.color, reset_camera=False,
+                render=False, show_scalar_bar=False,
+            )
+        appearance = replace(point_cloud.appearance, mode="points") if force_points else point_cloud.appearance
+        apply_appearance(actor, appearance, self._point_viewport())
         apply_color_map(actor, point_cloud)
-        self._apply_axis_scale(actor)
+        self._apply_object_transform(actor, point_cloud)
         self._attach_clipping(actor)
         self.actors[point_cloud.uuid] = actor
+        self._update_duplicate_marker(point_cloud)
         self._recompute_scene_bounds()
 
         return actor
 
     def _display_mesh(self, obj, source):
         self._source_meshes[obj.uuid] = source
+        self._display_objects[obj.uuid] = obj
         filtered = filtered_palette_mesh(source, obj)
         return filtered if filtered.n_cells else None
 
+    def _update_duplicate_marker(self, obj):
+        palette = getattr(getattr(obj, "appearance", None), "color_map", None)
+        enabled = palette is not None and palette.highlight_duplicates and supports_duplicates(obj)
+        if not enabled:
+            previous = self._duplicate_actors.pop(obj.uuid, None)
+            self._duplicate_signatures.pop(obj.uuid, None)
+            if previous is not None:
+                self.plotter.remove_actor(previous, reset_camera=False, render=False)
+            return
+        root = duplicate_root(obj)
+        layers = getattr(root, "layers", (root,))
+        signature = tuple((layer.uuid, id(layer.dataframe), len(layer.dataframe),
+                           layer.x_column, layer.y_column, layer.z_column,
+                           id(self._source_meshes.get(layer.uuid))) for layer in layers)
+        actor = self._duplicate_actors.get(obj.uuid)
+        if signature != self._duplicate_signatures.get(obj.uuid):
+            if actor is not None:
+                self.plotter.remove_actor(actor, reset_camera=False, render=False)
+                self._duplicate_actors.pop(obj.uuid, None)
+            info = duplicate_info(obj)
+            self._duplicate_signatures[obj.uuid] = signature
+            actor = None
+            if info["groups"]:
+                actor = self.plotter.add_points(info["coordinates"], name="duplicates:" + obj.uuid,
+                                               color="#ff0000", reset_camera=False, render=False,
+                                               show_scalar_bar=False, pickable=False)
+                self._duplicate_actors[obj.uuid] = actor
+        if actor is not None:
+            appearance = replace(obj.appearance, mode="points", color="#ff0000", color_map=None,
+                                 point_size=min(64, max(10, obj.appearance.point_size + 4)),
+                                 outline=False, opacity=1.)
+            apply_appearance(actor, appearance, self._point_viewport())
+            actor.mapper.scalar_visibility = False
+            actor.mapper.SetResolveCoincidentTopologyToPolygonOffset()
+            actor.mapper.SetRelativeCoincidentTopologyPointOffsetParameter(-10)
+            actor.visibility = obj.uuid not in self._hidden_ids
+            self._apply_object_transform(actor, obj)
+            if self.clip_enabled:
+                if actor.mapper.GetNumberOfClippingPlanes() == 0:
+                    self._attach_clipping(actor)
+            else:
+                actor.mapper.RemoveAllClippingPlanes()
+
+    def _sync_duplicate_markers(self):
+        with duplicate_batch():
+            for obj in self._display_objects.values():
+                self._update_duplicate_marker(obj)
+
+    def _store_actor_visibility(self, obj, actor):
+        if obj.uuid in self._hidden_ids:
+            actor.visibility = False
+            self.actors.pop(obj.uuid, None)
+            self._hidden_actors[obj.uuid] = actor
+        else:
+            actor.visibility = True
+            self._hidden_actors.pop(obj.uuid, None)
+            self.actors[obj.uuid] = actor
+
+    def _restore_source_actor(self, obj, source):
+        mesh = filtered_palette_mesh(source, obj)
+        if not mesh.n_cells:
+            return None
+        actor = self.add_mesh(mesh, name=obj.uuid)
+        apply_appearance(actor, obj.appearance, self._point_viewport())
+        apply_color_map(actor, obj)
+        self._apply_object_transform(actor, obj)
+        self._attach_clipping(actor)
+        self._store_actor_visibility(obj, actor)
+        if isinstance(obj, Well):
+            self._sync_well_label(obj)
+        return actor
+
+    def sync_object_visibility(self, project, roots):
+        """Toggle just affected actors, retaining hidden geometry for reuse."""
+        with self.scene_update():
+            seen = set()
+            for root in roots:
+                for obj in project.walk(root):
+                    if obj.uuid in seen or not isinstance(obj, (PointCloud, Surface, CatalogWell)):
+                        continue
+                    seen.add(obj.uuid)
+                    visible = project.is_visible(obj)
+                    actor = self.actors.get(obj.uuid)
+                    if not visible:
+                        self._hidden_ids.add(obj.uuid)
+                        for part in self._catalog_actors.get(obj.uuid, ()):
+                            part.visibility = False
+                        if actor is not None:
+                            actor.visibility = False
+                            self._hidden_actors[obj.uuid] = self.actors.pop(obj.uuid)
+                            if isinstance(obj, Well):
+                                self._sync_well_label(obj)
+                        continue
+                    self._hidden_ids.discard(obj.uuid)
+                    if actor is not None:
+                        continue
+                    actor = self._hidden_actors.pop(obj.uuid, None)
+                    if actor is not None:
+                        actor.visibility = True
+                        for part in self._catalog_actors.get(obj.uuid, ()):
+                            part.visibility = True
+                        self.actors[obj.uuid] = actor
+                        if isinstance(obj, Well):
+                            self._sync_well_label(obj)
+                    elif obj.uuid in self._source_meshes:
+                        self._restore_source_actor(obj, self._source_meshes[obj.uuid])
+                    else:
+                        self.add_object(obj)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
+
+    def remove_objects(self, objects):
+        """Remove deleted objects without rebuilding the rest of the scene."""
+        with self.scene_update():
+            for obj in objects:
+                catalog_parts = self._catalog_actors.pop(obj.uuid, ())
+                for part in catalog_parts:
+                    self.plotter.remove_actor(part, reset_camera=False, render=False)
+                actor = self.actors.pop(obj.uuid, None)
+                if actor is None:
+                    actor = self._hidden_actors.pop(obj.uuid, None)
+                if actor is not None and not catalog_parts:
+                    self.plotter.remove_actor(actor, reset_camera=False, render=False)
+                self._source_meshes.pop(obj.uuid, None)
+                self._display_objects.pop(obj.uuid, None)
+                duplicate_actor = self._duplicate_actors.pop(obj.uuid, None)
+                self._duplicate_signatures.pop(obj.uuid, None)
+                if duplicate_actor is not None:
+                    self.plotter.remove_actor(duplicate_actor, reset_camera=False, render=False)
+                self._hidden_ids.discard(obj.uuid)
+                if isinstance(obj, Well):
+                    self._visible_wells.pop(obj.uuid, None)
+                    self._sync_well_label(obj)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
+
+    def replace_source_meshes(self, sources):
+        """Install completed data on the GUI thread without touching other actors."""
+        with self.scene_update():
+            for obj, source in sources:
+                self._display_objects[obj.uuid] = obj
+                previous = self.actors.pop(obj.uuid, None)
+                if previous is None:
+                    previous = self._hidden_actors.pop(obj.uuid, None)
+                if previous is not None:
+                    self.plotter.remove_actor(previous, reset_camera=False, render=False)
+                self._source_meshes[obj.uuid] = source
+                self._restore_source_actor(obj, source)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
+
     def update_object_appearance(self, obj):
         self.update_object_appearances((obj,))
+
+    def rebuild_geometry_actors(self, objects):
+        """Recreate actors when the selected representation changes geometry."""
+        with self.scene_update():
+            for obj in objects:
+                if obj.uuid not in self._source_meshes:
+                    continue
+                self.plotter.remove_actor(obj.uuid, reset_camera=False, render=False)
+                self.actors.pop(obj.uuid, None)
+                self._hidden_actors.pop(obj.uuid, None)
+                if isinstance(obj, DataCube) and obj.is_corner_point:
+                    actor = self.add_corner_point_cube(obj)
+                elif isinstance(obj, PointCloud) and not isinstance(obj, Well):
+                    actor = self.add_point_cloud(obj)
+                else:
+                    actor = None
+                if actor is not None:
+                    self._store_actor_visibility(obj, actor)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
 
     def rebuild_palette_actors(self, objects):
         """Replace VTK mappers after a palette edit so cached GPU colors are discarded."""
         with self.scene_update():
             viewport = self._point_viewport()
             for obj in objects:
-                previous = self.actors.get(obj.uuid)
+                previous = self.actors.pop(obj.uuid, None)
+                if previous is None:
+                    previous = self._hidden_actors.pop(obj.uuid, None)
                 source = self._source_meshes.get(obj.uuid)
                 if source is None:
                     continue
@@ -307,16 +623,15 @@ class Viewer3D(QWidget):
                     self.plotter.remove_actor(previous, reset_camera=False, render=False)
                 mesh = filtered_palette_mesh(source, obj)
                 if not mesh.n_cells:
-                    self.actors.pop(obj.uuid, None)
                     if isinstance(obj, Well):
                         self._sync_well_label(obj)
                     continue
                 actor = self.add_mesh(mesh, name=obj.uuid)
                 apply_appearance(actor, obj.appearance, viewport)
                 apply_color_map(actor, obj)
-                self._apply_axis_scale(actor)
+                self._apply_object_transform(actor, obj)
                 self._attach_clipping(actor)
-                self.actors[obj.uuid] = actor
+                self._store_actor_visibility(obj, actor)
                 if isinstance(obj, Well):
                     self._sync_well_label(obj)
             self._recompute_scene_bounds()
@@ -329,11 +644,22 @@ class Viewer3D(QWidget):
                 if isinstance(obj, Well) and obj.uuid in self.actors:
                     self._sync_well_label(obj)
 
+    def update_object_transforms(self, objects):
+        """Apply a changed Z direction to cached actors without rebuilding meshes."""
+        with self.scene_update():
+            for obj in objects:
+                actor = self.actors.get(obj.uuid) or self._hidden_actors.get(obj.uuid)
+                if actor is not None:
+                    self._apply_object_transform(actor, obj)
+            self._recompute_scene_bounds()
+            self.update_coordinate_axes()
+            self.plotter.renderer.ResetCameraClippingRange()
+
     def update_object_appearances(self, objects):
         updated = False
         viewport = self._point_viewport()
         for obj in objects:
-            actor = self.actors.get(obj.uuid)
+            actor = self.actors.get(obj.uuid) or self._hidden_actors.get(obj.uuid)
             if actor is None:
                 continue
             apply_appearance(actor, obj.appearance, viewport)
@@ -342,16 +668,25 @@ class Viewer3D(QWidget):
                 self._sync_well_label(obj)
             updated = True
         if updated:
+            self._sync_duplicate_markers()
             self._recompute_scene_bounds()
             self.plotter.renderer.ResetCameraClippingRange()
             self.plotter.render()
 
     def _recompute_scene_bounds(self):
         self.scene_bounds = None
-        for actor in self.actors.values():
-            self.include_bounds(actor.bounds)
+        for actor in (*self.actors.values(), *self._duplicate_actors.values()):
+            if actor.visibility:
+                self.include_bounds(actor.bounds)
+        for parts in self._catalog_actors.values():
+            for actor in parts[1:]:
+                if actor.visibility:
+                    self.include_bounds(actor.bounds)
         if self.clip_enabled:
-            self._sync_clipping_visuals()
+            if self.scene_bounds is None:
+                self._remove_clipping_visuals()
+            else:
+                self._sync_clipping_visuals()
 
     def _attach_clipping(self, actor):
         if self.clip_enabled:
@@ -375,7 +710,8 @@ class Viewer3D(QWidget):
             self.clip_rotation = rotation
             self.clip_invert = invert
             if not enabled:
-                for actor in self.actors.values():
+                for actor in (*self.actors.values(), *self._hidden_actors.values(), *self._duplicate_actors.values(),
+                              *(part for parts in self._catalog_actors.values() for part in parts[1:])):
                     actor.mapper.RemoveAllClippingPlanes()
                 self._remove_clipping_visuals()
                 self._refresh_clipped_well_labels()
@@ -385,7 +721,8 @@ class Viewer3D(QWidget):
             self._clip_plane.SetOrigin(*world_origin)
             self._clip_plane.SetNormal(*(normal * (-1 if invert else 1)))
             self._clip_plane.Modified()
-            for actor in self.actors.values():
+            for actor in (*self.actors.values(), *self._hidden_actors.values(), *self._duplicate_actors.values(),
+                          *(part for parts in self._catalog_actors.values() for part in parts[1:])):
                 if actor.mapper.GetNumberOfClippingPlanes() == 0:
                     self._attach_clipping(actor)
                 actor.mapper.Modified()
@@ -446,6 +783,16 @@ class Viewer3D(QWidget):
         actor.origin = (0, 0, 0)
         actor.scale = self.axis_scale
 
+    def _apply_object_transform(self, actor, obj):
+        if isinstance(obj, DisplayPoints):
+            # Keep the source tables and meshes in their original coordinates.
+            # This transform also survives mapper replacement on palette edits.
+            transform = np.eye(4)
+            if obj.display_grid.z_direction == "down":
+                transform[2, 2] = -1
+            actor.user_matrix = transform
+        self._apply_axis_scale(actor)
+
     def set_axis_scale(self, scale):
         with self.scene_update():
             self.axis_scale = tuple(scale)
@@ -453,7 +800,8 @@ class Viewer3D(QWidget):
             if axes is not None:
                 largest = max(self.axis_scale)
                 axes.SetTotalLength(*(value / largest for value in self.axis_scale))
-            for actor in self.actors.values():
+            for actor in (*self.actors.values(), *self._hidden_actors.values(), *self._duplicate_actors.values(),
+                          *(part for parts in self._catalog_actors.values() for part in parts[1:])):
                 self._apply_axis_scale(actor)
             if self.clip_enabled:
                 self.set_clipping_settings(True, self.clip_origin,
@@ -550,7 +898,8 @@ class Viewer3D(QWidget):
     def _update_point_viewport(self, *args):
         viewport = self._point_viewport()
         if viewport != self._last_viewport:
-            for actor in self.actors.values():
+            for actor in (*self.actors.values(), *self._hidden_actors.values(), *self._duplicate_actors.values(),
+                          *(part for parts in self._catalog_actors.values() for part in parts[1:])):
                 if actor.prop.style == "Points":
                     set_point_viewport(actor, viewport)
             self._last_viewport = viewport

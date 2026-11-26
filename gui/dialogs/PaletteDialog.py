@@ -91,7 +91,7 @@ class PaletteDialog(QDialog):
         if not fields:
             raise ValueError("Объект не содержит числовых параметров для окраски.")
         if self.palette is None:
-            if obj.TYPE in ("wellfile", "layered_cube"):
+            if obj.TYPE in ("wellfile", "layered_cube", "layered_display_points"):
                 excluded = {"x", "y", "z", "I", "J", "K", "N_POINTS",
                             "CENTER_X", "CENTER_Y", "CENTER_Z"}
                 excluded.update(filter(None, (getattr(obj, "roof_column", None),
@@ -153,6 +153,17 @@ class PaletteDialog(QDialog):
         filter_layout.addRow(self.filter_check)
         filter_layout.addRow("От — до", filter_limits)
         layout.addWidget(filter_group)
+        from models.duplicates import supports_duplicates
+        self.duplicate_check = QCheckBox("Показывать дубликаты XYZ красным")
+        self.duplicate_check.setObjectName("highlight_duplicates")
+        self.duplicate_check.setToolTip("Все точки с одинаковыми X, Y и Z, включая совпадения между слоями. "
+                                        "Красные маркеры исходных узлов видны и при отображении сетки.")
+        self.duplicate_check.setVisible(supports_duplicates(obj))
+        layout.addWidget(self.duplicate_check)
+        self.duplicate_note = QLabel()
+        self.duplicate_note.setWordWrap(True)
+        self._duplicate_info = None
+        layout.addWidget(self.duplicate_note)
         layout.addWidget(QLabel("Узлы: перетащите маркер, чтобы изменить его положение"))
         middle = QHBoxLayout()
         self.stop_list = QListWidget()
@@ -198,6 +209,7 @@ class PaletteDialog(QDialog):
         self.filter_minimum_spin.valueChanged.connect(self._filter_changed)
         self.filter_maximum_spin.valueChanged.connect(self._filter_changed)
         self.filter_reset_button.clicked.connect(self._reset_filter)
+        self.duplicate_check.toggled.connect(self._duplicates_changed)
         self.interpolation_combo.currentIndexChanged.connect(self._method_changed)
         self.stop_list.currentRowChanged.connect(self._select)
         self.gradient.stopSelected.connect(self.stop_list.setCurrentRow)
@@ -233,6 +245,8 @@ class PaletteDialog(QDialog):
             self.maximum_spin.setValue(self.palette.maximum)
             active_filter = self.palette.filter_range is not None
             self.filter_check.setChecked(active_filter)
+            self.duplicate_check.setChecked(self.palette.highlight_duplicates)
+            self._update_duplicate_note()
             for spin in (self.filter_minimum_spin, self.filter_maximum_spin):
                 spin.setMinimum(1e-15 if logarithmic else -1e15)
                 spin.setEnabled(active_filter)
@@ -256,6 +270,23 @@ class PaletteDialog(QDialog):
             self.gradient.update()
         finally:
             self._loading = False
+
+    def _duplicates_changed(self, checked):
+        if self._loading:
+            return
+        self.palette = replace(self.palette, highlight_duplicates=checked)
+        self._update_duplicate_note()
+
+    def _update_duplicate_note(self):
+        from models.duplicates import duplicate_info, supports_duplicates
+        if not self.palette.highlight_duplicates or not supports_duplicates(self.obj):
+            self.duplicate_note.clear()
+            return
+        if self._duplicate_info is None:
+            self._duplicate_info = duplicate_info(self.obj)
+        info = self._duplicate_info
+        self.duplicate_note.setText(f"Совпадения XYZ: {info['rows']:,} точек в {info['groups']:,} узлах. "
+                                    "Проверяются исходные координаты, включая слои файла.")
 
     def _select(self, index):
         if index < 0 or index >= len(self.palette.stops):
@@ -434,7 +465,8 @@ class PaletteDialog(QDialog):
                 loaded = load_surfer_clr(path, self.field_combo.currentData(),
                                          self.minimum_spin.value(), self.maximum_spin.value())
                 self.palette = replace(loaded, value_scale=self.palette.value_scale,
-                                       filter_range=self.palette.filter_range)
+                                       filter_range=self.palette.filter_range,
+                                       highlight_duplicates=self.palette.highlight_duplicates)
                 self.palette.validate()
                 self._refresh(0)
             except (OSError, UnicodeError, ValueError) as error:

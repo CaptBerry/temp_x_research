@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -25,16 +26,41 @@ class CsvImporter(BaseImporter):
     def _read_csv(self, filename, delimiter="auto", header=True, nrows=None):
         path = Path(filename)
         sep = self._resolve_delimiter(path, delimiter)
-        dataframe = pd.read_csv(
-            path,
-            sep=sep,
-            header=0 if header else None,
-            nrows=nrows,
-            engine="python" if sep in (None, r"\s+") else "c",
-        )
+        # Excel exports in Russian locales commonly use ; and decimal commas.
+        # Retry the whole read: non-ASCII data may occur after the preview rows.
+        for encoding in ("utf-8-sig", "cp1251"):
+            try:
+                dataframe = pd.read_csv(
+                    path,
+                    sep=sep,
+                    header=0 if header else None,
+                    nrows=nrows,
+                    encoding=encoding,
+                    decimal=self._resolve_decimal(path, sep, encoding),
+                    engine="python" if sep in (None, r"\s+") else "c",
+                )
+                break
+            except UnicodeDecodeError:
+                if encoding == "cp1251":
+                    raise
         # Stable string labels also support headerless files in Qt and JSON.
         dataframe.columns = [str(column) for column in dataframe.columns]
         return dataframe
+
+    def _resolve_decimal(self, path, sep, encoding):
+        with path.open(encoding=encoding) as stream:
+            # Whole lines avoid splitting a UTF-8 character or a number.
+            sample = []
+            for _, line in zip(range(100), stream):
+                sample.append(line)
+        rows = (line.split() for line in sample) if sep == r"\s+" else csv.reader(sample, delimiter=sep or ",")
+        counts = {".": 0, ",": 0}
+        for row in rows:
+            for value in row:
+                for mark in counts:
+                    pattern = rf"[+-]?(?:\d+{re.escape(mark)}\d*|{re.escape(mark)}\d+)(?:[eE][+-]?\d+)?"
+                    counts[mark] += bool(re.fullmatch(pattern, value.strip()))
+        return "," if counts[","] and not counts["."] else "."
 
     def _resolve_delimiter(self, path, delimiter):
         delimiter = (delimiter or "auto").lower()

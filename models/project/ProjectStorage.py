@@ -19,9 +19,11 @@ from importers.CsvImporter import CsvImporter
 from models.CornerPointGrid import CornerPointGrid
 from models.DataCube import DataCube
 from models.LayeredCube import LayeredCube
+from models.DisplayPoints import LayeredDisplayPoints
 from models.PointCloud import PointCloud
 from models.Surface import Surface
 from models.WellFile import WellFile
+from models.CalculationArtifact import CalculationArtifact
 from models.project.TableStorage import TableStorage
 
 
@@ -33,9 +35,9 @@ class ProjectFormatError(ValueError):
 
 
 class ProjectStorage:
-    VERSION = 3
+    VERSION = 4
     _HASH = re.compile(r"[0-9a-f]{64}\Z")
-    _WORK_SUFFIXES = (".table.npz", ".surface.npz", ".corner.npz")
+    _WORK_SUFFIXES = (".table.npz", ".surface.npz", ".corner.npz", ".calculation.zip")
 
     @staticmethod
     def read_manifest(path):
@@ -44,7 +46,7 @@ class ProjectStorage:
         if not isinstance(data, dict):
             raise ProjectFormatError("Файл проекта должен содержать JSON-объект.")
         version = data.get("version", 2)
-        if type(version) is not int or version not in (2, ProjectStorage.VERSION):
+        if type(version) is not int or version not in (2, 3, ProjectStorage.VERSION):
             raise ProjectFormatError(f"Неподдерживаемая версия проекта: {version}")
         if not isinstance(data.get("name"), str) or not data["name"].strip():
             raise ProjectFormatError("В проекте не указано имя.")
@@ -86,13 +88,42 @@ class ProjectStorage:
 
     @classmethod
     def _store_source(cls, directory, source, name):
-        content = source.read_bytes()
-        identifier = hashlib.sha256(name.encode("utf-8") + b"\0" + content).hexdigest()
+        source = Path(source)
+        prefix = name.encode("utf-8") + b"\0"
+
+        def source_hash(path):
+            digest = hashlib.sha256(prefix)
+            with path.open("rb") as stream:
+                while block := stream.read(8 * 1024 * 1024):
+                    digest.update(block)
+            return digest.hexdigest()
+
+        before = source.stat()
+        identifier = source_hash(source)
+        after = source.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise OSError("Исходный файл изменился во время сохранения проекта.")
         relative = Path("source") / identifier / name
         target = directory / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists() or target.read_bytes() != content:
-            cls._write_atomic(target, content)
+        if target.is_file() and (source.resolve() == target.resolve()
+                                 or target.stat().st_size == before.st_size
+                                 and source_hash(target) == identifier):
+            return relative.as_posix()
+        descriptor, temporary = tempfile.mkstemp(prefix=".saving-", dir=target.parent)
+        try:
+            copied = hashlib.sha256(prefix)
+            with os.fdopen(descriptor, "wb") as output, source.open("rb") as stream:
+                while block := stream.read(8 * 1024 * 1024):
+                    copied.update(block)
+                    output.write(block)
+                output.flush()
+                os.fsync(output.fileno())
+            if copied.hexdigest() != identifier:
+                raise OSError("Исходный файл изменился во время сохранения проекта.")
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         return relative.as_posix()
 
     @classmethod
@@ -136,11 +167,14 @@ class ProjectStorage:
         manifest = project._serialize()
         manifest["last_saved"] = saved_at
         source_paths = {}
+        source_cache = {}
         objects = {obj.uuid: obj for obj in project.walk()}
 
         def store_node(node):
             obj = objects[node["uuid"]]
-            if isinstance(obj, (WellFile, LayeredCube)):
+            if isinstance(obj, CalculationArtifact):
+                node["data_file"] = cls._store_asset(directory, "work", ".calculation.zip", obj.dumps())
+            if isinstance(obj, (WellFile, LayeredCube, LayeredDisplayPoints)):
                 obj.validate()
             if isinstance(obj, DataCube) and obj.is_corner_point:
                 obj.validate()
@@ -174,7 +208,10 @@ class ProjectStorage:
                     if (not isinstance(name, str) or not name or name in (".", "..")
                             or Path(name).name != name or Path(name).is_reserved()):
                         name = source.name
-                    node["file_path"] = cls._store_source(directory, source, name)
+                    key = (source.resolve(), name)
+                    if key not in source_cache:
+                        source_cache[key] = cls._store_source(directory, source, name)
+                    node["file_path"] = source_cache[key]
                 source_paths[obj.uuid] = node["file_path"]
             for child in node.get("children", []):
                 store_node(child)
@@ -193,6 +230,8 @@ class ProjectStorage:
         legacy = manifest.get("version", 2) == 2
 
         def load_node(obj, node):
+            if isinstance(obj, CalculationArtifact):
+                obj.load(cls.asset_path(project.project_path, node.get("data_file")))
             if isinstance(obj, (PointCloud, Surface)):
                 source = node.get("file_path")
                 if source:
@@ -225,6 +264,17 @@ class ProjectStorage:
                                                    properties,
                                                    arrays["explicit_corners"] if "explicit_corners" in arrays else None)
                         obj.set_corner_grid(grid)
+                        if obj.metadata.get("prediction"):
+                            codes = obj.dataframe["class_index"].to_numpy(float)
+                            classes = list(obj.metadata.get("classes", []))
+                            valid = np.isfinite(codes) & (codes >= 0) & (codes < len(classes))
+                            labels = np.full(len(codes), "Нет прогноза", dtype=object)
+                            labels[valid] = np.asarray(classes, dtype=object)[codes[valid].astype(int)]
+                            obj.dataframe["source_row"] = np.arange(len(codes))
+                            obj.dataframe["class_name"] = labels
+                            obj.dataframe["status"] = np.where(valid, "прогноз", "недостаточно данных")
+                            if "confidence" not in obj.dataframe:
+                                obj.dataframe["confidence"] = np.nan
                     elif isinstance(obj, PointCloud):
                         obj.dataframe = TableStorage.load(path)
                     else:
@@ -242,7 +292,7 @@ class ProjectStorage:
                     obj.validate()
             for child, child_data in zip(obj.children, node.get("children", [])):
                 load_node(child, child_data)
-            if isinstance(obj, (WellFile, LayeredCube)):
+            if isinstance(obj, (WellFile, LayeredCube, LayeredDisplayPoints)):
                 obj.validate()
 
         load_node(project.root, manifest["tree"])

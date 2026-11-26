@@ -13,19 +13,25 @@ from models.WellFile import WellFile
 from importers.GrdeclImporter import load_grdecl
 from importers.PointCloudGridBuilder import build_grid_from_centres
 from importers.LayeredGridBuilder import build_layered_cube
+from importers.DisplayPointsImporter import build_display_points
 
 
-TABLE_TYPES = ("pointcloud", "well", "wellfile", "cube", "surface")
+TABLE_TYPES = ("pointcloud", "well", "wellfile", "cube", "surface", "display_points")
 MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".obj", ".ply", ".vtu", ".vts"}
 
 
 def build_table_object(object_type, dataframe, source, coordinates, parameters=(), id_column=None,
                        surface_kind="general", cube_geometry="nodes", grid_dimensions=(0, 0, 0),
                        singleton_size=1.0, connect_existing=True, layer_column=None,
-                       roof_column=None, base_column=None):
+                       roof_column=None, base_column=None, z_direction="auto"):
     if object_type not in TABLE_TYPES:
         raise ValueError("Неизвестный тип импортируемого объекта.")
     source = Path(source)
+    if object_type == "display_points":
+        return build_display_points(dataframe, source, coordinates, parameters,
+                                    layout=cube_geometry if cube_geometry in ("layers", "intervals") else "xyz",
+                                    layer_column=layer_column, roof_column=roof_column,
+                                    base_column=base_column, z_direction=z_direction)
     parameters = [name for name in parameters if object_type not in ("well", "wellfile") or name != id_column]
     if object_type == "cube" and cube_geometry == "layered":
         return build_layered_cube(dataframe, source, coordinates, parameters,

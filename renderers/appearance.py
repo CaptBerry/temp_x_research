@@ -4,6 +4,8 @@ import numpy as np
 import pyvista as pv
 from models.DataCube import DataCube
 from models.Surface import Surface
+from renderers.point_cells import CELL_SOURCE_ROW
+from renderers.display_points import DISPLAY_CELLS, display_field
 
 
 PALETTE_SCALARS = "_xsearch_palette_values"
@@ -14,9 +16,13 @@ def filtered_palette_mesh(mesh, obj):
     palette = obj.appearance.color_map
     if palette is None or palette.filter_range is None:
         return mesh
-    cell_scalars = isinstance(obj, DataCube) and obj.is_corner_point
-    values = np.asarray(obj.color_values(palette.field), dtype=float)
+    derived = DISPLAY_CELLS in mesh.field_data
+    cell_scalars = derived or isinstance(obj, DataCube) and obj.is_corner_point or obj.appearance.mode == "cells"
     data = mesh.cell_data if cell_scalars else mesh.point_data
+    values = (np.asarray(data[display_field(palette.field)], dtype=float) if derived
+              else np.asarray(obj.color_values(palette.field), dtype=float))
+    if cell_scalars and CELL_SOURCE_ROW in data:
+        values = values[np.asarray(data[CELL_SOURCE_ROW], dtype=np.int64)]
     data[PALETTE_SCALARS] = values
     if isinstance(obj, Surface):
         # Clip faces at the requested values so the remaining surface reaches
@@ -37,12 +43,17 @@ def apply_color_map(actor, obj):
         mapper.Modified()
         actor.Modified()
         return
-    cell_scalars = isinstance(obj, DataCube) and obj.is_corner_point
+    derived = DISPLAY_CELLS in mapper.dataset.field_data
+    cell_scalars = derived or isinstance(obj, DataCube) and obj.is_corner_point or obj.appearance.mode == "cells"
     data = mapper.dataset.cell_data if cell_scalars else mapper.dataset.point_data
     # Thresholding copies the selected scalar values onto its output. The
     # original object's array is longer than a filtered mesh's point/cell set.
     values = (np.asarray(data[PALETTE_SCALARS], dtype=float)
-              if palette.filter_range is not None else obj.color_values(palette.field))
+              if palette.filter_range is not None else
+              np.asarray(data[display_field(palette.field)], dtype=float) if derived else
+              obj.color_values(palette.field))
+    if palette.filter_range is None and cell_scalars and CELL_SOURCE_ROW in data:
+        values = np.asarray(values)[np.asarray(data[CELL_SOURCE_ROW], dtype=np.int64)]
     if palette.value_scale == "log":
         # Logarithms are undefined for zero and negative samples. Show them
         # with the lookup table's NaN color instead of the lowest palette color.
@@ -76,13 +87,17 @@ def apply_appearance(actor, appearance, viewport):
     actor.clear_shader_replacements()
     prop = actor.prop
     prop.opacity = appearance.opacity
-    prop.style = "points" if appearance.mode == "spheres" else appearance.mode
+    prop.style = ("points" if appearance.mode == "spheres" else
+                  "surface" if appearance.mode in ("cells", "corner_grid") else
+                  "wireframe" if appearance.mode == "grid_wireframe" else appearance.mode)
     prop.color = appearance.color
     prop.edge_color = appearance.outline_color
     prop.line_width = appearance.line_width
-    prop.show_edges = appearance.mode == "surface" and appearance.outline
+    outline = (appearance.prism_outline if appearance.mode in ("cells", "corner_grid")
+               and appearance.prism_outline is not None else appearance.outline)
+    prop.show_edges = appearance.mode in ("surface", "cells", "corner_grid") and outline
     prop.render_points_as_spheres = appearance.mode == "spheres"
-    prop.lighting = appearance.mode in ("surface", "spheres")
+    prop.lighting = appearance.mode in ("surface", "cells", "corner_grid", "spheres")
     prop.point_size = appearance.point_size
 
     if appearance.mode not in ("points", "spheres"):

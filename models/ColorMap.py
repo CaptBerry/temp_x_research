@@ -31,6 +31,7 @@ class ColorMap:
     opacity_stops: tuple[OpacityStop, ...] = ()
     value_scale: str = "linear"
     filter_range: tuple[float, float] | None = None
+    highlight_duplicates: bool = False
 
     @classmethod
     def default(cls, field, minimum, maximum):
@@ -39,6 +40,8 @@ class ColorMap:
             ColorStop(100, "#ff0000")))
 
     def validate(self):
+        if type(self.highlight_duplicates) is not bool:
+            raise ValueError("Отображение дубликатов должно быть включено или выключено.")
         if not isinstance(self.field, str) or not self.field:
             raise ValueError("Выберите числовой параметр палитры.")
         if not all(type(v) in (int, float) and math.isfinite(v)
@@ -89,7 +92,8 @@ class ColorMap:
                          data.get("interpolation", 0),
                          tuple(OpacityStop(**s) for s in data.get("opacity_stops", [])),
                          data.get("value_scale", "linear"),
-                         (tuple(data["filter_range"]) if data.get("filter_range") is not None else None))
+                         (tuple(data["filter_range"]) if data.get("filter_range") is not None else None),
+                         data.get("highlight_duplicates", False))
             result.validate()
             return result
         except (KeyError, TypeError, AttributeError) as error:

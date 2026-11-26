@@ -54,7 +54,9 @@ class DataCube(PointCloud):
         if not self.parameters:
             raise ValueError("Для куба выберите хотя бы один параметр.")
         if self.appearance.mode in ("surface", "wireframe"):
-            raise ValueError("Для куба из узлов доступны только точки и сферы.")
+            raise ValueError("Для куба из узлов доступны только точки, сферы и ячейки.")
+        if self.appearance.mode == "cells" and self.cell_edges() is None:
+            raise ValueError("Для отображения ячеек нужны центры в строках и слоях XYZ.")
         if not any(name in self.numeric_fields() for name in self.parameters):
             raise ValueError("Куб должен содержать числовой параметр узлов.")
         if self.dataframe[[self.x_column, self.y_column, self.z_column]].duplicated().any():

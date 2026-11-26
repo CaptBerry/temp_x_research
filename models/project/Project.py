@@ -16,6 +16,9 @@ from models.Well import Well
 from models.WellFile import WellFile
 from models.DataCube import DataCube
 from models.LayeredCube import LayeredCube
+from models.DisplayPoints import DisplayPoints, LayeredDisplayPoints
+from models.CalculationArtifact import CalculationArtifact, TrainingSet, CatalogWell
+from models.Canvas import CanvasDocument
 
 
 class Project:
@@ -24,13 +27,18 @@ class Project:
     VERSION = ProjectStorage.VERSION
     OBJECT_TYPES = {"folder": Folder, "surface": Surface, "pointcloud": PointCloud,
                     "well": Well, "wellfile": WellFile, "cube": DataCube,
-                    "layered_cube": LayeredCube}
+                    "layered_cube": LayeredCube, "calculation": CalculationArtifact,
+                    "display_points": DisplayPoints, "layered_display_points": LayeredDisplayPoints,
+                    "training_set": TrainingSet}
 
     def __init__(self):
         self.name = "New Project"
         self.root = Folder("Work")
+        self.root._add(self._new_canvas_folder())
+        self.canvas = CanvasDocument()
         self.project_path: Path | None = None
         self.modified = False
+        self._change_serial = 0
         self.created = datetime.now(timezone.utc).isoformat()
         self.last_saved = None
         self.axis_scale = (1.0, 1.0, 1.0)
@@ -96,7 +104,9 @@ class Project:
         project.last_saved = data.get("last_saved")
         project._deserialize(data)
         ProjectStorage.load_assets(project, data)
-        project.modified = data.get("version", 2) != cls.VERSION or project._migrated_axis_scale
+        reorganized = project.organize_canvas_results()
+        project.modified = (data.get("version", 2) != cls.VERSION
+                            or project._migrated_axis_scale or reorganized)
         return project
 
     def _save_to(self, path, *, new_destination=False):
@@ -124,6 +134,7 @@ class Project:
                 relative = paths[obj.uuid]
                 obj.file_path = str(self.project_path / relative) if relative else None
         self.modified = False
+        self._change_serial += 1
 
     def save(self):
         if self.project_path is None:
@@ -137,6 +148,7 @@ class Project:
         self._save_to(path, new_destination=path != self.project_path)
 
     def _serialize(self):
+        CanvasDocument.from_dict(self.canvas.to_dict())
         from scene.clipping import validate_clipping
         validate_clipping(self.clip_enabled, self.clip_origin,
                           self.clip_rotation, self.clip_invert)
@@ -154,7 +166,7 @@ class Project:
                                   rotation=list(self.clip_rotation),
                                   invert=self.clip_invert,
                                   initialized=self.clip_initialized),
-                    tree=self.root.to_dict())
+                    canvas=self.canvas.to_dict(), tree=self.root.to_dict())
 
     def set_clipping(self, enabled, origin, rotation, invert=False):
         from scene.clipping import validate_clipping
@@ -218,6 +230,7 @@ class Project:
         return True
 
     def _deserialize(self, data):
+        self.canvas = CanvasDocument.from_dict(data.get("canvas", {}))
         from scene.clipping import validate_clipping
         clipping = data.get("clipping", {})
         if not isinstance(clipping, dict):
@@ -277,6 +290,7 @@ class Project:
             raise ProjectFormatError("Корень проекта должен быть папкой.")
 
     def mark_modified(self):
+        self._change_serial += 1
         self.modified = True
 
     @staticmethod
@@ -288,6 +302,51 @@ class Project:
     def _require_member(self, obj):
         if not any(node is obj for node in self.walk()):
             raise ValueError("Объект не принадлежит этому проекту.")
+
+    @staticmethod
+    def _new_canvas_folder():
+        folder = Folder("Canvas")
+        folder.metadata["system_role"] = "canvas_results"
+        return folder
+
+    def canvas_folder(self):
+        """The persistent tree container for objects produced by Canvas runs."""
+        folder = next((child for child in self.root.children
+                       if child.TYPE == "folder"
+                       and child.metadata.get("system_role") == "canvas_results"), None)
+        if folder is None:
+            folder = next((child for child in self.root.children
+                           if child.TYPE == "folder" and child.name == "Canvas"
+                           and not child.metadata.get("system_role")), None)
+            if folder is not None:
+                folder.metadata["system_role"] = "canvas_results"
+                self.mark_modified()
+        if folder is None:
+            folder = self.add(self._new_canvas_folder())
+        return folder
+
+    def add_canvas_result(self, obj):
+        return self.add(obj, self.canvas_folder())
+
+    def organize_canvas_results(self):
+        """Migrate old output locations without changing UUIDs or nested assets."""
+        serial = self._change_serial
+        folder = self.canvas_folder()
+        result_ids = {run.get("output_uuid") for run in self.canvas.runs}
+        results = [obj for obj in self.walk()
+                   if obj is not self.root and obj is not folder
+                   and (obj.uuid in result_ids or obj.metadata.get("canvas_node"))]
+        candidates = {obj.uuid for obj in results}
+        for obj in results:
+            parent = obj.parent
+            # A layered result moves as a whole. Keep user grouping inside Canvas.
+            while parent is not None:
+                if parent is folder or parent.uuid in candidates:
+                    break
+                parent = parent.parent
+            if parent is None:
+                self.move(obj, folder)
+        return self._change_serial != serial
 
     def add(self, obj, parent=None):
         parent = self.root if parent is None else parent
@@ -302,7 +361,7 @@ class Project:
         if len(set(incoming_ids)) != len(incoming_ids) or existing_ids.intersection(incoming_ids):
             raise ValueError("Объект уже находится в проекте или имеет повторяющийся UUID.")
         container_style = None
-        if isinstance(parent, (WellFile, LayeredCube)):
+        if isinstance(parent, (WellFile, LayeredCube, LayeredDisplayPoints)):
             container_style = parent.appearance
             container_style.validate(obj.TYPE)
             if container_style.color_map is not None:
@@ -310,18 +369,24 @@ class Project:
         parent._add(obj)
         if container_style is not None:
             obj.appearance = container_style
+            if isinstance(parent, LayeredDisplayPoints):
+                obj.display_grid = parent.display_grid
         self.mark_modified()
         return obj
 
     def remove(self, obj):
         self._require_member(obj)
+        if isinstance(obj, CatalogWell):
+            raise ValueError("Скважина каталога удаляется только вместе с каталогом; её можно скрыть галочкой.")
         if obj is self.root:
             raise ValueError("Нельзя удалить корневую папку.")
         obj.parent._remove(obj)
         self.mark_modified()
 
     def clear(self):
+        folder = self.canvas_folder()
         self.root._clear()
+        self.root._add(folder)
         self.mark_modified()
 
     def move(self, obj, new_parent):
@@ -343,7 +408,12 @@ class Project:
                            for layer in new_parent.layers)):
                 raise ValueError("В послойный куб можно переместить только новый слой corner-point grid.")
         container_style = None
-        if isinstance(new_parent, (WellFile, LayeredCube)):
+        if isinstance(new_parent, LayeredDisplayPoints):
+            if (not isinstance(obj, DisplayPoints) or obj.metadata.get("layer_name") is None
+                    or any(layer.metadata["layer_name"] == obj.metadata["layer_name"]
+                           for layer in new_parent.layers)):
+                raise ValueError("В слои точек можно переместить только новый слой точек.")
+        if isinstance(new_parent, (WellFile, LayeredCube, LayeredDisplayPoints)):
             container_style = new_parent.appearance
             container_style.validate(obj.TYPE)
             if container_style.color_map is not None:
@@ -352,10 +422,14 @@ class Project:
         new_parent._add(obj)
         if container_style is not None:
             obj.appearance = container_style
+            if isinstance(new_parent, LayeredDisplayPoints):
+                obj.display_grid = new_parent.display_grid
         self.mark_modified()
 
     def rename(self, obj, new_name):
         self._require_member(obj)
+        if isinstance(obj, CatalogWell):
+            raise ValueError("Имя дочерней скважины берётся из каталога образцов.")
         new_name = self._valid_name(new_name)
         if obj.name != new_name:
             obj.name = new_name
@@ -390,7 +464,7 @@ class Project:
 
     def set_appearance(self, obj, **changes):
         self._require_member(obj)
-        if isinstance(obj, (WellFile, LayeredCube)):
+        if isinstance(obj, (WellFile, LayeredCube, LayeredDisplayPoints)):
             candidate = obj.appearance.updated(obj.TYPE, **changes)
             if candidate.color_map is not None:
                 obj.color_values(candidate.color_map.field)
@@ -411,12 +485,28 @@ class Project:
             raise ValueError("У этого объекта нет настроек отображения.")
         candidate = obj.appearance.updated(obj.TYPE, **changes)
         if isinstance(obj, DataCube) and not obj.is_corner_point and candidate.mode in ("surface", "wireframe"):
-            raise ValueError("Для куба из узлов доступны только точки и сферы.")
+            raise ValueError("Для куба из узлов доступны только точки, сферы и ячейки.")
+        if candidate.mode == "cells" and not (isinstance(obj, DataCube) and obj.is_corner_point) \
+                and obj.cell_edges() is None:
+            raise ValueError("Для отображения ячеек нужны центры в строках и слоях XYZ.")
         if candidate.color_map is not None:
             obj.color_values(candidate.color_map.field)
         if candidate == obj.appearance:
             return False
         obj.appearance = candidate
+        self.mark_modified()
+        return True
+
+    def set_display_grid(self, obj, **changes):
+        self._require_member(obj)
+        if not isinstance(obj, (DisplayPoints, LayeredDisplayPoints)):
+            raise ValueError("Настройки сетки доступны для нового варианта импорта точек.")
+        candidate = obj.display_grid.updated(**changes)
+        targets = [obj, *obj.children] if isinstance(obj, LayeredDisplayPoints) else [obj]
+        if all(target.display_grid == candidate for target in targets):
+            return False
+        for target in targets:
+            target.display_grid = candidate
         self.mark_modified()
         return True
 
@@ -498,7 +588,7 @@ class Project:
         return self.modified
 
     def import_file(self, obj, destination_folder=None):
-        if isinstance(obj, (PointCloud, Surface, WellFile, LayeredCube)):
+        if isinstance(obj, (PointCloud, Surface, WellFile, LayeredCube, LayeredDisplayPoints)):
             obj.validate()
         return self.add(obj, destination_folder)
 
